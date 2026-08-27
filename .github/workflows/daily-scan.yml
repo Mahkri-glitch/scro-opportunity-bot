@@ -15,6 +15,11 @@ on:
           - test-webhook
           - dry-run
           - scan-and-post
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/run-opportunity-scan"
 
 permissions:
   contents: write
@@ -48,7 +53,7 @@ jobs:
         id: mode
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "push" ]]; then
             echo "value=scan-and-post" >> "$GITHUB_OUTPUT"
           else
             echo "value=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
