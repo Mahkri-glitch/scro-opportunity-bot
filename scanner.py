@@ -307,6 +307,16 @@ def score_job(job: Job, us_only: bool = True) -> RankedJob | None:
     return RankedJob(job=job, score=score, tags=tuple(tags[:5]))
 
 
+def rank_jobs(jobs: Iterable[Job], us_only: bool = True) -> list[RankedJob]:
+    ranked: list[RankedJob] = []
+    for job in jobs:
+        result = score_job(job, us_only=us_only)
+        if result is not None:
+            ranked.append(result)
+    ranked.sort(key=lambda item: (-item.score, item.job.company.casefold(), item.job.title.casefold()))
+    return ranked
+
+
 def opportunity_type(title: str) -> str:
     lowered = title.casefold()
     if "co-op" in lowered or "coop" in lowered or "co op" in lowered:
@@ -634,12 +644,7 @@ def main() -> int:
         logging.error("Every configured job source failed; state was not changed")
         return 1
 
-    ranked = [
-        result
-        for job in all_jobs.values()
-        if (result := score_job(job, us_only=bool(settings.get("us_only", True))) is not None)
-    ]
-    ranked.sort(key=lambda item: (-item.score, item.job.company.casefold(), item.job.title.casefold()))
+    ranked = rank_jobs(all_jobs.values(), us_only=bool(settings.get("us_only", True)))
     new_ranked = [item for item in ranked if item.job.stable_id not in seen]
     limit = int(settings.get("max_alerts_per_run", 20))
     alerts = new_ranked[:limit]
