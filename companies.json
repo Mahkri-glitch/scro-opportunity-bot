@@ -1,0 +1,80 @@
+{
+  "settings": {
+    "max_alerts_per_run": 20,
+    "request_timeout_seconds": 25,
+    "seen_retention_days": 365,
+    "us_only": true
+  },
+  "sources": [
+    {
+      "company": "Applied Materials",
+      "enabled": true,
+      "host": "amat.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op", "early career"],
+      "site": "External",
+      "tenant": "amat",
+      "type": "workday"
+    },
+    {
+      "company": "KLA",
+      "enabled": true,
+      "host": "kla.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op", "university"],
+      "site": "Search",
+      "tenant": "kla",
+      "type": "workday"
+    },
+    {
+      "company": "Intel",
+      "enabled": true,
+      "host": "intel.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "student", "graduate engineer"],
+      "site": "External",
+      "tenant": "intel",
+      "type": "workday"
+    },
+    {
+      "company": "Micron Technology",
+      "enabled": true,
+      "host": "micron.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op", "university"],
+      "site": "External",
+      "tenant": "micron",
+      "type": "workday"
+    },
+    {
+      "company": "GlobalFoundries",
+      "enabled": true,
+      "host": "globalfoundries.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op", "university intern"],
+      "site": "External",
+      "tenant": "globalfoundries",
+      "type": "workday"
+    },
+    {
+      "company": "Analog Devices",
+      "enabled": true,
+      "host": "analogdevices.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op", "student"],
+      "site": "External",
+      "tenant": "analogdevices",
+      "type": "workday"
+    },
+    {
+      "company": "NXP Semiconductors",
+      "enabled": true,
+      "host": "nxp.wd3.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "student", "graduate engineer"],
+      "site": "careers",
+      "tenant": "nxp",
+      "type": "workday"
+    }
+  ]
+}
