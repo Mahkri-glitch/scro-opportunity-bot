@@ -1,6 +1,6 @@
 import unittest
 
-from scanner import Job, canonical_url, looks_non_us, score_job
+from scanner import Job, RankedJob, canonical_url, looks_non_us, rank_jobs, score_job
 
 
 class ScannerTests(unittest.TestCase):
@@ -53,6 +53,30 @@ class ScannerTests(unittest.TestCase):
             canonical_url("https://Example.com/jobs/123/?source=campus"),
             "https://example.com/jobs/123",
         )
+
+    def test_rank_jobs_returns_ranked_jobs_not_filter_booleans(self):
+        jobs = [
+            Job(
+                company="Example Semiconductor",
+                title="Yield Engineering Intern",
+                location="Austin, Texas",
+                url="https://example.com/jobs/yield-intern",
+                source="Test",
+            ),
+            Job(
+                company="Example Semiconductor",
+                title="Finance Intern",
+                location="Austin, Texas",
+                url="https://example.com/jobs/finance-intern",
+                source="Test",
+            ),
+        ]
+
+        ranked = rank_jobs(jobs)
+
+        self.assertEqual(len(ranked), 1)
+        self.assertIsInstance(ranked[0], RankedJob)
+        self.assertEqual(ranked[0].job.title, "Yield Engineering Intern")
 
 
 if __name__ == "__main__":
