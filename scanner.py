@@ -561,6 +561,7 @@ def post_discord(webhook: str, ranked_jobs: list[RankedJob]) -> None:
         payload = {
             "username": DISCORD_BOT_NAME,
             "content": (
+                "Help me build more AI data centers! Take a peek at these roles.\n"
                 f"**New semiconductor opportunities — {datetime.now().strftime('%B %d, %Y')}** "
                 f"({batch_number}/{total_batches})"
             ),
@@ -575,7 +576,10 @@ def post_test(webhook: str) -> None:
     validate_webhook(webhook)
     payload = {
         "username": DISCORD_BOT_NAME,
-        "content": "✅ Jensen Huang is connected. Daily semiconductor scans are ready for testing.",
+        "content": (
+            "✅ Jensen Huang is connected. Daily semiconductor scans are ready for testing.\n\n"
+            "Help me build more AI data centers! Take a peek at these roles."
+        ),
         "allowed_mentions": {"parse": []},
     }
     request_json("POST", webhook, payload=payload, params={"wait": "true"}, timeout=25)
