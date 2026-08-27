@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "companies.json"
 DEFAULT_STATE = ROOT / "seen_jobs.json"
 USER_AGENT = "SCRO-Opportunity-Bot/1.0 (+https://github.com/Mahkri-glitch/scro-opportunity-bot)"
+DISCORD_BOT_NAME = "Jensen Huang"
 
 EARLY_CAREER_PATTERNS = (
     r"\bintern(ship)?\b",
@@ -558,7 +559,7 @@ def post_discord(webhook: str, ranked_jobs: list[RankedJob]) -> None:
     for index in range(0, len(embeds), 10):
         batch_number = index // 10 + 1
         payload = {
-            "username": "SCRO Opportunity Bot",
+            "username": DISCORD_BOT_NAME,
             "content": (
                 f"**New semiconductor opportunities — {datetime.now().strftime('%B %d, %Y')}** "
                 f"({batch_number}/{total_batches})"
@@ -573,8 +574,8 @@ def post_discord(webhook: str, ranked_jobs: list[RankedJob]) -> None:
 def post_test(webhook: str) -> None:
     validate_webhook(webhook)
     payload = {
-        "username": "SCRO Opportunity Bot",
-        "content": "✅ SCRO Opportunity Bot is connected. Daily semiconductor scans are ready for testing.",
+        "username": DISCORD_BOT_NAME,
+        "content": "✅ Jensen Huang is connected. Daily semiconductor scans are ready for testing.",
         "allowed_mentions": {"parse": []},
     }
     request_json("POST", webhook, payload=payload, params={"wait": "true"}, timeout=25)
