@@ -1,0 +1,85 @@
+name: Daily semiconductor opportunity scan
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "America/New_York"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose a safe connectivity test, a preview, or a real scan"
+        required: true
+        default: "test-webhook"
+        type: choice
+        options:
+          - test-webhook
+          - dry-run
+          - scan-and-post
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scro-opportunity-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Resolve run mode
+        id: mode
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "value=scan-and-post" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test Discord webhook
+        if: steps.mode.outputs.value == 'test-webhook'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scanner.py --send-test
+
+      - name: Preview matches without posting
+        if: steps.mode.outputs.value == 'dry-run'
+        run: python scanner.py --dry-run
+
+      - name: Scan and post new matches
+        if: steps.mode.outputs.value == 'scan-and-post'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scanner.py
+
+      - name: Persist duplicate-suppression state
+        if: steps.mode.outputs.value == 'scan-and-post'
+        shell: bash
+        run: |
+          git config user.name "SCRO Opportunity Bot"
+          git config user.email "scro-bot@users.noreply.github.com"
+          git add seen_jobs.json
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update seen opportunity state"
+            git push
+          fi
