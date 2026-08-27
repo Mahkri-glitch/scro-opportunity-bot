@@ -121,27 +121,55 @@ EXCLUDED_FUNCTION_TERMS = (
 
 FLORIDA_TERMS = ("florida", ", fl", "-fl-", "orlando", "melbourne", "tampa", "gainesville")
 
-NON_US_MARKERS = (
+NON_US_COUNTRY_MARKERS = (
+    "argentina",
+    "australia",
+    "belgium",
+    "brazil",
+    "bulgaria",
+    "canada",
+    "china",
+    "costa rica",
+    "czech republic",
+    "czechia",
+    "denmark",
+    "england",
+    "finland",
+    "france",
+    "germany",
+    "hong kong",
+    "hungary",
     "singapore",
     "malaysia",
     "india",
-    "china",
-    "taiwan",
-    "vietnam",
-    "korea",
-    "japan",
-    "germany",
-    "france",
-    "italy",
-    "netherlands",
+    "indonesia",
     "ireland",
     "israel",
-    "united kingdom",
-    "canada",
+    "italy",
+    "japan",
+    "korea",
     "mexico",
+    "netherlands",
+    "new zealand",
+    "philippines",
     "poland",
-    "austria",
+    "portugal",
+    "romania",
+    "scotland",
+    "spain",
+    "sweden",
     "switzerland",
+    "taiwan",
+    "thailand",
+    "tbilisi",
+    "united arab emirates",
+    "united kingdom",
+    "vietnam",
+    "austria",
+    "wales",
+)
+
+NON_US_COUNTRY_CODES = (
     "kor",
     "sgp",
     "mys",
@@ -156,34 +184,84 @@ US_MARKERS = (
     "united states",
     "usa",
     "u.s.",
-    "remote",
-    "-us-",
     "alabama",
+    "alaska",
     "arizona",
+    "arkansas",
     "california",
     "colorado",
     "connecticut",
+    "delaware",
+    "district of columbia",
     "florida",
     "georgia",
+    "hawaii",
     "idaho",
     "illinois",
     "indiana",
+    "iowa",
+    "kansas",
+    "kentucky",
+    "louisiana",
+    "maine",
+    "maryland",
     "massachusetts",
     "michigan",
     "minnesota",
+    "mississippi",
+    "missouri",
+    "montana",
+    "nebraska",
+    "nevada",
+    "new hampshire",
     "new jersey",
     "new mexico",
     "new york",
     "north carolina",
+    "north dakota",
     "ohio",
+    "oklahoma",
     "oregon",
     "pennsylvania",
+    "puerto rico",
+    "rhode island",
+    "south carolina",
+    "south dakota",
+    "tennessee",
     "texas",
     "utah",
     "vermont",
     "virginia",
     "washington",
+    "west virginia",
     "wisconsin",
+    "wyoming",
+)
+
+US_STATE_CODES = (
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
+    "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+    "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
+    "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+    "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI",
+    "WY", "PR",
+)
+
+BACHELOR_PATTERNS = (
+    r"\bbachelor(?:'s|s)?\b",
+    r"\bundergraduate\b",
+    r"\bb\.?\s?s\.?\s+(?:degree|student|candidate)\b",
+)
+
+MASTER_PATTERNS = (
+    r"\bmaster(?:'s|s)?\b",
+    r"\bm\.?\s?s\.?\s+(?:degree|student|candidate)\b",
+)
+
+DOCTORAL_TITLE_PATTERNS = (
+    r"\bph\.?\s?d\.?\b",
+    r"\bdoctoral\b",
+    r"\bpostdoc(?:toral)?\b",
 )
 
 
@@ -260,11 +338,45 @@ def matches_any(text: str, patterns: Iterable[str]) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
 
-def looks_non_us(location: str) -> bool:
-    lowered = location.casefold()
-    if not lowered or any(marker in lowered for marker in US_MARKERS):
+def contains_country_code(text: str, codes: Iterable[str]) -> bool:
+    code_pattern = "|".join(re.escape(code) for code in codes)
+    return bool(re.search(rf"(?:^|[\s,;/()_-])(?:{code_pattern})(?:$|[\s,;/()_-])", text, re.IGNORECASE))
+
+
+def contains_phrase(text: str, phrases: Iterable[str]) -> bool:
+    cleaned = clean_text(text).casefold()
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(phrase.casefold())}(?![a-z0-9])", cleaned)
+        for phrase in phrases
+    )
+
+
+def has_non_us_marker(text: str) -> bool:
+    return contains_phrase(text, NON_US_COUNTRY_MARKERS) or contains_country_code(
+        text, NON_US_COUNTRY_CODES
+    )
+
+
+def has_explicit_us_location(location: str) -> bool:
+    cleaned = clean_text(location)
+    if not cleaned or has_non_us_marker(cleaned):
         return False
-    return any(marker in lowered for marker in NON_US_MARKERS)
+    if contains_phrase(cleaned, US_MARKERS):
+        return True
+    if contains_country_code(cleaned, ("US",)):
+        return True
+    return contains_country_code(cleaned, US_STATE_CODES)
+
+
+def is_us_based(title: str, location: str) -> bool:
+    if has_non_us_marker(f"{title} {location}"):
+        return False
+    return has_explicit_us_location(location)
+
+
+def looks_non_us(location: str) -> bool:
+    """Return true for foreign or insufficiently specific locations."""
+    return not has_explicit_us_location(location)
 
 
 def score_job(job: Job, us_only: bool = True) -> RankedJob | None:
@@ -276,11 +388,22 @@ def score_job(job: Job, us_only: bool = True) -> RankedJob | None:
         return None
     if matches_any(title, SENIOR_PATTERNS) and "intern" not in title_lower:
         return None
-    if us_only and looks_non_us(job.location):
+    if matches_any(title, DOCTORAL_TITLE_PATTERNS) and not (
+        matches_any(title, BACHELOR_PATTERNS) or matches_any(title, MASTER_PATTERNS)
+    ):
+        return None
+    if us_only and not is_us_based(title, job.location):
         return None
 
     score = 5
     tags: list[str] = [opportunity_type(title)]
+
+    if matches_any(combined, BACHELOR_PATTERNS):
+        score += 4
+        tags.append("Bachelor's")
+    if matches_any(combined, MASTER_PATTERNS):
+        score += 4
+        tags.append("Master's")
 
     for term, points in HIGH_PRIORITY_TERMS.items():
         if term in combined:
@@ -391,6 +514,7 @@ class Scanner:
         endpoint = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
         terms = source.get("search_terms", ["intern", "co-op", "early career"])
         jobs: dict[str, Job] = {}
+        external_paths: dict[str, str] = {}
 
         for term in terms:
             offset = 0
@@ -427,9 +551,44 @@ class Scanner:
                         posted=clean_text(item.get("postedOn")),
                     )
                     jobs[job.stable_id] = job
+                    external_paths[job.stable_id] = external_path
                 offset += len(postings)
                 if offset >= int(data.get("total", offset)):
                     break
+
+        if source.get("fetch_details", True):
+            candidates = [
+                job
+                for job in jobs.values()
+                if matches_any(job.title, EARLY_CAREER_PATTERNS)
+                and not has_non_us_marker(f"{job.title} {job.location}")
+            ]
+            candidates.sort(
+                key=lambda job: (score_job(job, us_only=False) or RankedJob(job, 0, ())).score,
+                reverse=True,
+            )
+            detail_limit = int(source.get("max_detail_requests", 50))
+            for job in candidates[:detail_limit]:
+                external_path = external_paths.get(job.stable_id, "")
+                if not external_path or external_path.startswith("http"):
+                    continue
+                detail_url = f"https://{host}/wday/cxs/{tenant}/{site}{external_path}"
+                try:
+                    detail = request_json("GET", detail_url, timeout=self.timeout)
+                    info = detail.get("jobPostingInfo", {})
+                    jobs[job.stable_id] = Job(
+                        company=job.company,
+                        title=clean_text(info.get("title")) or job.title,
+                        location=clean_text(info.get("location")) or job.location,
+                        url=clean_text(info.get("externalUrl")) or job.url,
+                        source=job.source,
+                        external_id=job.external_id,
+                        posted=clean_text(info.get("startDate")) or job.posted,
+                        description=clean_text(info.get("jobDescription")),
+                    )
+                except (HttpRequestError, json.JSONDecodeError):
+                    # Search results remain usable when a detail endpoint is unavailable.
+                    continue
         return list(jobs.values())
 
     def _greenhouse(self, source: dict[str, Any]) -> list[Job]:
