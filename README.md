@@ -13,7 +13,13 @@ manufacturing.
 - Packaging, test, reliability, facilities, automation, and process control
 - Relevant electrical, mechanical, materials, chemical, industrial, hardware,
   supply-chain, and technician opportunities
+- Roles explicitly open to bachelor's and master's students receive an
+  additional ranking boost; PhD/postdoctoral-only titles are excluded
 - Florida opportunities receive an additional ranking boost
+
+Only roles with an explicitly identifiable U.S. location are eligible. Country
+names in either the title or location are checked, and blank, vague, or
+country-unspecified remote locations are excluded.
 
 The bot currently scans verified public Workday feeds for Applied Materials,
 KLA, Intel, Micron, GlobalFoundries, Analog Devices, and NXP. The scanner also
