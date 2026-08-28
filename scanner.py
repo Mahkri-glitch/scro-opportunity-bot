@@ -399,6 +399,29 @@ def request_text_with_headers(
         raise HttpRequestError(f"Request failed for {url}: {exc.reason}") from exc
 
 
+def response_cookie_header(response_headers: Any) -> str:
+    """Return response cookies in the compact form expected by later API calls."""
+    raw_cookies: list[str] = []
+    if hasattr(response_headers, "get_all"):
+        raw_cookies = list(response_headers.get_all("Set-Cookie") or [])
+    elif hasattr(response_headers, "get"):
+        raw_value = response_headers.get("Set-Cookie")
+        if isinstance(raw_value, list):
+            raw_cookies = [str(value) for value in raw_value]
+        elif raw_value:
+            raw_cookies = [str(raw_value)]
+
+    cookie_pairs: dict[str, str] = {}
+    for raw_cookie in raw_cookies:
+        pair = raw_cookie.split(";", 1)[0].strip()
+        if "=" not in pair:
+            continue
+        name, value = pair.split("=", 1)
+        if name.strip():
+            cookie_pairs[name.strip()] = value.strip()
+    return "; ".join(f"{name}={value}" for name, value in cookie_pairs.items())
+
+
 def canonical_url(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
@@ -840,76 +863,251 @@ class Scanner:
         terms = source.get("search_terms", ["intern", "co-op"])
         max_pages = int(source.get("max_pages_per_term", 30))
         jobs: dict[str, Job] = {}
+        position_ids: dict[str, str] = {}
+        configured_generation = source.get("api_generation", "auto").strip().casefold()
+        if configured_generation not in {"auto", "pcsx", "classic"}:
+            raise ValueError(f"Unsupported Eightfold API generation: {configured_generation!r}")
+        generation = configured_generation
+
+        def position_location(item: dict[str, Any]) -> str:
+            values: list[str] = []
+
+            def add_location(raw: Any) -> None:
+                if isinstance(raw, list):
+                    for entry in raw:
+                        add_location(entry)
+                    return
+                if isinstance(raw, str):
+                    label = clean_text(raw)
+                elif isinstance(raw, dict):
+                    label = first_clean(
+                        raw,
+                        "displayName",
+                        "formattedAddress",
+                        "locationName",
+                        "name",
+                        "location",
+                    )
+                    if not label:
+                        label = ", ".join(
+                            filter(
+                                None,
+                                [
+                                    first_clean(raw, "city", "cityName"),
+                                    first_clean(raw, "state", "stateName", "region"),
+                                    first_clean(raw, "country", "countryName"),
+                                ],
+                            )
+                        )
+                else:
+                    label = ""
+                if label and label.casefold() not in {value.casefold() for value in values}:
+                    values.append(label)
+
+            for key in (
+                "location",
+                "primaryLocation",
+                "standardizedLocations",
+                "locations",
+                "standardized_locations",
+            ):
+                add_location(item.get(key))
+            return " / ".join(values)
+
+        def position_posted(item: dict[str, Any]) -> str:
+            raw = (
+                item.get("postedTs")
+                or item.get("creationTs")
+                or item.get("t_create")
+                or item.get("t_update")
+            )
+            if raw in (None, ""):
+                return first_clean(item, "postedDate", "posted_date", "datePosted")
+            try:
+                timestamp = float(raw)
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000
+                return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
+            except (TypeError, ValueError, OSError):
+                return clean_text(raw)
+
+        def position_url(item: dict[str, Any], external_id: str, api: str) -> str:
+            raw_url = first_clean(
+                item,
+                "positionUrl",
+                "publicUrl",
+                "canonicalPositionUrl",
+                "position_url",
+                "public_url",
+                "url",
+            )
+            if raw_url.startswith("http://") or raw_url.startswith("https://"):
+                return raw_url
+            if raw_url and not raw_url.casefold().startswith("javascript:"):
+                return urljoin(f"https://{host}/", raw_url)
+            if not external_id:
+                return ""
+            if api == "pcsx":
+                suffix = f"?{urlencode({'domain': domain})}" if domain else ""
+                return f"https://{host}/careers/job/{external_id}{suffix}"
+            query = {"pid": external_id}
+            if domain:
+                query["domain"] = domain
+            return f"https://{host}/careers?{urlencode(query)}"
+
+        def normalize_position(
+            item: dict[str, Any], api: str, fallback: Job | None = None
+        ) -> Job:
+            found_id = first_clean(
+                item,
+                "id",
+                "positionId",
+                "position_id",
+                "displayJobId",
+                "display_job_id",
+                "atsJobId",
+                "requisitionId",
+            )
+            external_id = fallback.external_id if fallback and fallback.external_id else found_id
+            description = " ".join(
+                filter(
+                    None,
+                    [
+                        first_clean(item, "department"),
+                        first_clean(item, "businessUnit", "business_unit"),
+                        first_clean(item, "workLocationOption"),
+                        first_clean(item, "jobDescription", "job_description", "description"),
+                    ],
+                )
+            )
+            if fallback and fallback.description and fallback.description not in description:
+                description = " ".join(filter(None, [description, fallback.description]))
+            return Job(
+                company=source["company"],
+                title=first_clean(item, "name", "title", "posting_name")
+                or (fallback.title if fallback else ""),
+                location=position_location(item) or (fallback.location if fallback else ""),
+                url=position_url(item, external_id or found_id, api)
+                or (fallback.url if fallback else ""),
+                source="Eightfold",
+                external_id=external_id,
+                posted=position_posted(item) or (fallback.posted if fallback else ""),
+                description=description,
+            )
 
         for term in terms:
             for page in range(max_pages):
                 start = page * 10
-                params = {
-                    "query": term,
-                    "start": str(start),
-                    "num": "10",
-                    "sort_by": "timestamp",
-                }
-                if domain:
-                    params["domain"] = domain
-                data = request_json(
-                    "GET",
-                    f"https://{host}/api/apply/v2/jobs",
-                    params=params,
-                    timeout=self.timeout,
-                )
-                positions = data.get("positions", [])
+                wrapper: dict[str, Any] = {}
+                if generation in {"auto", "pcsx"}:
+                    params = {
+                        "query": term,
+                        "location": "",
+                        "start": str(start),
+                        "sort_by": "most_recent",
+                        "filter_include_remote": "1",
+                    }
+                    if domain:
+                        params["domain"] = domain
+                    try:
+                        data = request_json(
+                            "GET",
+                            f"https://{host}/api/pcsx/search",
+                            params=params,
+                            headers={
+                                "Origin": f"https://{host}",
+                                "Referer": f"https://{host}/careers",
+                            },
+                            timeout=self.timeout,
+                        )
+                        pcsx_wrapper = data.get("data") if isinstance(data, dict) else None
+                        if isinstance(pcsx_wrapper, dict) and (
+                            "positions" in pcsx_wrapper or "count" in pcsx_wrapper
+                        ):
+                            generation = "pcsx"
+                            wrapper = pcsx_wrapper
+                        elif generation == "pcsx":
+                            raise HttpRequestError(
+                                f"Eightfold PCSX returned an unexpected response for {host}"
+                            )
+                        else:
+                            generation = "classic"
+                    except (HttpRequestError, json.JSONDecodeError):
+                        if generation == "pcsx":
+                            raise
+                        generation = "classic"
+
+                if generation == "classic":
+                    params = {
+                        "query": term,
+                        "start": str(start),
+                        "num": "10",
+                        "sort_by": "timestamp",
+                    }
+                    if domain:
+                        params["domain"] = domain
+                    data = request_json(
+                        "GET",
+                        f"https://{host}/api/apply/v2/jobs",
+                        params=params,
+                        headers={"Referer": f"https://{host}/careers"},
+                        timeout=self.timeout,
+                    )
+                    wrapper = data if isinstance(data, dict) else {}
+
+                positions = wrapper.get("positions", [])
                 if not isinstance(positions, list) or not positions:
                     break
                 for item in positions:
                     if not isinstance(item, dict):
                         continue
-                    external_id = first_clean(item, "id", "display_job_id")
-                    canonical = first_clean(item, "canonicalPositionUrl", "position_url", "public_url")
-                    if canonical and not canonical.startswith("https://"):
-                        canonical = ""
-                    url = canonical or (
-                        f"https://{host}/careers?{urlencode({'pid': external_id, **({'domain': domain} if domain else {})})}"
-                        if external_id
-                        else ""
-                    )
-                    location_parts: list[str] = []
-                    direct_location = clean_text(item.get("location"))
-                    if direct_location:
-                        location_parts.append(direct_location)
-                    for location in item.get("locations", []) if isinstance(item.get("locations"), list) else []:
-                        cleaned = clean_text(location)
-                        if cleaned and cleaned not in location_parts:
-                            location_parts.append(cleaned)
-                    timestamp = item.get("t_create") or item.get("t_update")
-                    try:
-                        posted = datetime.fromtimestamp(float(timestamp), timezone.utc).date().isoformat()
-                    except (TypeError, ValueError, OSError):
-                        posted = ""
-                    job = Job(
-                        company=source["company"],
-                        title=first_clean(item, "name", "posting_name"),
-                        location=" / ".join(location_parts),
-                        url=url,
-                        source="Eightfold",
-                        external_id=external_id,
-                        posted=posted,
-                        description=" ".join(
-                            filter(
-                                None,
-                                [
-                                    first_clean(item, "department"),
-                                    first_clean(item, "business_unit"),
-                                    first_clean(item, "job_description", "description"),
-                                ],
-                            )
-                        ),
-                    )
+                    job = normalize_position(item, generation)
                     if job.url and job.title:
                         jobs[job.stable_id] = job
-                count = int(data.get("count", 0) or 0)
-                if len(positions) < 10 or (count and start + len(positions) >= count):
+                        position_ids[job.stable_id] = first_clean(
+                            item, "id", "positionId", "position_id"
+                        ) or job.external_id
+                count = int(wrapper.get("count", 0) or 0)
+                if len(positions) < 10 or (
+                    generation == "pcsx" and count and start + len(positions) >= count
+                ):
                     break
+
+        if generation == "pcsx" and source.get("fetch_details", True):
+            candidates = [
+                job
+                for job in jobs.values()
+                if matches_any(job.title, INTERNSHIP_PATTERNS)
+                and matches_target_role(job.title)
+                and not has_non_us_marker(f"{job.title} {job.location}")
+            ]
+            candidates.sort(
+                key=lambda job: (score_job(job, us_only=False) or RankedJob(job, 0, ())).score,
+                reverse=True,
+            )
+            for job in candidates[: int(source.get("max_detail_requests", 50))]:
+                position_id = position_ids.get(job.stable_id, "")
+                if not position_id:
+                    continue
+                params = {"position_id": position_id, "hl": "en"}
+                if domain:
+                    params["domain"] = domain
+                try:
+                    detail = request_json(
+                        "GET",
+                        f"https://{host}/api/pcsx/position_details",
+                        params=params,
+                        headers={"Referer": job.url or f"https://{host}/careers"},
+                        timeout=self.timeout,
+                    )
+                except (HttpRequestError, json.JSONDecodeError):
+                    continue
+                detail_wrapper = detail.get("data") if isinstance(detail, dict) else None
+                if not isinstance(detail_wrapper, dict):
+                    continue
+                position = detail_wrapper.get("position", detail_wrapper)
+                if isinstance(position, dict):
+                    jobs[job.stable_id] = normalize_position(position, "pcsx", fallback=job)
         return list(jobs.values())
 
     def _oracle(self, source: dict[str, Any]) -> list[Job]:
@@ -1069,10 +1267,46 @@ class Scanner:
         board = source.get("board", "CANDIDATEPORTAL")
         culture = source.get("culture", "en-US")
         endpoint = f"https://{host}/api/geo/{client}/jobposting/search"
-        board_url = f"https://{host}/{culture}/{client}/{board}"
         page_size = 25
         max_pages = int(source.get("max_pages", 10))
         jobs: dict[str, Job] = {}
+
+        context_url = (
+            f"https://{host}/api/geo/{client}/sitecontext/"
+            f"{client}/{board}/{culture}"
+        )
+        try:
+            context = request_json("GET", context_url, timeout=self.timeout)
+            context_data = context.get("siteContext", context) if isinstance(context, dict) else {}
+            if isinstance(context_data, dict):
+                board = first_clean(context_data, "jobBoardCode") or board
+        except (HttpRequestError, json.JSONDecodeError):
+            # The configured board remains valid when this optional discovery call is unavailable.
+            pass
+
+        board_url = f"https://{host}/{culture}/{client}/{board}"
+        csrf_text, csrf_headers = request_text_with_headers(
+            "GET",
+            f"https://{host}/api/auth/csrf",
+            headers={"Accept": "application/json", "Referer": board_url},
+            timeout=self.timeout,
+        )
+        try:
+            csrf_data = json.loads(csrf_text)
+        except json.JSONDecodeError as exc:
+            raise HttpRequestError(f"Dayforce did not return a CSRF token for {client}") from exc
+        csrf_token = first_clean(csrf_data, "csrfToken", "token") if isinstance(csrf_data, dict) else ""
+        if not csrf_token:
+            raise HttpRequestError(f"Dayforce did not return a CSRF token for {client}")
+        request_headers = {
+            "Accept": "application/json",
+            "Origin": f"https://{host}",
+            "Referer": board_url,
+            "X-CSRF-TOKEN": csrf_token,
+        }
+        cookie_header = response_cookie_header(csrf_headers)
+        if cookie_header:
+            request_headers["Cookie"] = cookie_header
 
         for page in range(max_pages):
             data = request_json(
@@ -1085,7 +1319,7 @@ class Scanner:
                     "distanceUnit": 0,
                     "paginationStart": page * page_size,
                 },
-                headers={"Origin": f"https://{host}", "Referer": board_url},
+                headers=request_headers,
                 timeout=self.timeout,
             )
             candidates = (
@@ -1375,21 +1609,14 @@ class Scanner:
             raise HttpRequestError(f"Cornerstone did not expose an anonymous token for {host}")
         token = token_match.group(1)
 
-        cookie_pairs: dict[str, str] = {}
-        set_cookies = response_headers.get_all("Set-Cookie") if hasattr(response_headers, "get_all") else []
-        for raw_cookie in set_cookies or []:
-            pair = raw_cookie.split(";", 1)[0].strip()
-            if "=" in pair:
-                name, value = pair.split("=", 1)
-                if name.strip():
-                    cookie_pairs[name.strip()] = value.strip()
+        cookie_header = response_cookie_header(response_headers)
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             "Referer": home_url,
         }
-        if cookie_pairs:
-            headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookie_pairs.items())
+        if cookie_header:
+            headers["Cookie"] = cookie_header
 
         jobs: dict[str, Job] = {}
         page_size = 25
@@ -1467,7 +1694,6 @@ class Scanner:
 
     def _static(self, source: dict[str, Any]) -> list[Job]:
         page_url = source["page_url"]
-        page_html = request_text("GET", page_url, timeout=self.timeout)
         jobs: dict[str, Job] = {}
         href_pattern = re.compile(source.get("anchor_href_pattern", r".+"), re.IGNORECASE)
         title_location_pattern = (
@@ -1477,16 +1703,9 @@ class Scanner:
         )
         default_location = source.get("default_location", "")
 
-        for href, body in re.findall(
-            r"<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)</a>",
-            page_html,
-            re.IGNORECASE,
-        ):
-            absolute_url = urljoin(page_url, html.unescape(href))
-            if not href_pattern.search(absolute_url):
-                continue
-            title = clean_text(body)
-            location = default_location
+        def add_job(title_value: str, location_value: str, url: str) -> None:
+            title = clean_text(title_value)
+            location = clean_text(location_value)
             if title_location_pattern:
                 match = title_location_pattern.search(title)
                 if not match:
@@ -1494,31 +1713,88 @@ class Scanner:
                 else:
                     title = clean_text(match.groupdict().get("title", title))
                     location = clean_text(match.groupdict().get("location", location))
-            if title:
-                job = Job(
-                    company=source["company"],
-                    title=title,
-                    location=location,
-                    url=absolute_url,
-                    source="Official careers page",
-                    external_id=f"{title}|{canonical_url(absolute_url)}",
-                )
-                jobs[job.stable_id] = job
+            if not title:
+                return
+            job = Job(
+                company=source["company"],
+                title=title,
+                location=location,
+                url=url,
+                source="Official careers page",
+                external_id=f"{title}|{canonical_url(url)}",
+            )
+            jobs[job.stable_id] = job
 
-        if source.get("include_headings", False):
-            for body in re.findall(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", page_html, re.IGNORECASE):
-                title = clean_text(body)
-                if not title:
-                    continue
-                job = Job(
-                    company=source["company"],
-                    title=title,
-                    location=default_location,
-                    url=page_url,
-                    source="Official careers page",
-                    external_id=title,
-                )
-                jobs[job.stable_id] = job
+        def parse_html(page_html: str) -> None:
+            for href, body in re.findall(
+                r"<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)</a>",
+                page_html,
+                re.IGNORECASE,
+            ):
+                absolute_url = urljoin(page_url, html.unescape(href))
+                if href_pattern.search(absolute_url):
+                    add_job(body, default_location, absolute_url)
+
+            if source.get("include_headings", False):
+                for body in re.findall(
+                    r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", page_html, re.IGNORECASE
+                ):
+                    add_job(body, default_location, page_url)
+
+        def parse_markdown(markdown: str) -> None:
+            lines = markdown.splitlines()
+            link_pattern = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
+            for index, line in enumerate(lines):
+                for match in link_pattern.finditer(line):
+                    href = html.unescape(match.group(2).strip().split()[0])
+                    absolute_url = urljoin(page_url, href)
+                    if not href_pattern.search(absolute_url):
+                        continue
+                    title = clean_text(re.sub(r"[*_`]+", "", match.group(1)))
+                    location = default_location
+                    if title_location_pattern:
+                        same_line = clean_text(
+                            re.sub(link_pattern, lambda value: value.group(1), line)
+                        )
+                        candidates = [same_line]
+                        for following in lines[index + 1 : index + 4]:
+                            following = clean_text(re.sub(r"[*_`]+", "", following))
+                            if following:
+                                candidates.append(f"{title} {following}")
+                                break
+                        title = next(
+                            (
+                                candidate
+                                for candidate in candidates
+                                if title_location_pattern.search(candidate)
+                            ),
+                            title,
+                        )
+                        location = ""
+                    add_job(title, location, absolute_url)
+
+            if source.get("include_headings", False):
+                for line in lines:
+                    match = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+                    if match:
+                        add_job(re.sub(r"[*_`]+", "", match.group(1)), default_location, page_url)
+
+        direct_error: HttpRequestError | None = None
+        try:
+            page_html = request_text("GET", page_url, timeout=self.timeout)
+            if re.search(r"cf-chl|cloudflare|just a moment", page_html, re.IGNORECASE):
+                raise HttpRequestError(f"Anti-bot challenge returned for {page_url}")
+            parse_html(page_html)
+        except HttpRequestError as exc:
+            direct_error = exc
+
+        fallback_url = source.get("reader_fallback_url", "").strip()
+        if fallback_url and (direct_error is not None or not jobs):
+            markdown = request_text("GET", fallback_url, timeout=self.timeout)
+            parse_markdown(markdown)
+        elif direct_error is not None:
+            raise direct_error
+
         return list(jobs.values())
 
 
