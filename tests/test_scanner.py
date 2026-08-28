@@ -1,4 +1,6 @@
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scanner import (
@@ -9,12 +11,96 @@ from scanner import (
     has_explicit_us_location,
     is_us_based,
     looks_non_us,
+    matches_target_role,
     rank_jobs,
     score_job,
 )
 
 
 class ScannerTests(unittest.TestCase):
+    def test_config_covers_every_requested_company(self):
+        requested = {
+            "Applied Materials", "Lam Research", "KLA", "ASML", "ASM International",
+            "Tokyo Electron", "Onto Innovation", "Axcelis Technologies", "Veeco",
+            "MKS Instruments", "INFICON", "Intel", "Micron", "GlobalFoundries", "TSMC",
+            "Samsung Semiconductor", "Texas Instruments", "Wolfspeed", "SkyWater Technology",
+            "onsemi", "Analog Devices", "Infineon", "STMicroelectronics", "NXP", "Qorvo",
+            "Amkor", "ASE", "Teradyne", "Advantest", "Entegris", "Air Products",
+            "Air Liquide", "Linde", "FUJIFILM Electronic Materials", "Shin-Etsu",
+            "GlobalWafers",
+        }
+        config = json.loads((Path(__file__).parents[1] / "companies.json").read_text())
+        configured = {source["company"] for source in config["sources"] if source.get("enabled", True)}
+
+        self.assertEqual(configured, requested)
+        self.assertEqual(len(config["sources"]), len(requested))
+
+    def test_each_requested_role_area_is_eligible(self):
+        role_titles = (
+            "Process Engineering Intern",
+            "Yield Engineering Intern",
+            "Manufacturing Engineering Intern",
+            "Product Engineering Intern",
+            "Equipment Engineering Intern",
+            "Metrology Intern",
+            "Process Integration Co-op",
+            "Lithography Engineering Intern",
+            "Etch Process Intern",
+            "Deposition Engineering Intern",
+            "CVD Intern",
+            "PVD Engineering Co-op",
+            "ALD Process Intern",
+            "CMP Engineering Intern",
+            "Advanced Packaging Intern",
+            "Test Engineering Intern",
+            "Reliability Engineering Intern",
+            "Semiconductor Engineering Intern",
+        )
+
+        for index, title in enumerate(role_titles):
+            with self.subTest(title=title):
+                job = Job(
+                    company="Example Semiconductor",
+                    title=title,
+                    location="Austin, TX",
+                    url=f"https://example.com/jobs/target-{index}",
+                    source="Test",
+                )
+                self.assertTrue(matches_target_role(title))
+                self.assertIsNotNone(score_job(job))
+
+    def test_generic_engineering_intern_is_excluded(self):
+        job = Job(
+            company="Example Semiconductor",
+            title="Electrical Engineering Intern",
+            location="Austin, TX",
+            url="https://example.com/jobs/generic-engineering",
+            source="Test",
+        )
+        self.assertIsNone(score_job(job))
+
+    def test_description_cannot_make_generic_title_eligible(self):
+        job = Job(
+            company="Example Semiconductor",
+            title="Mechanical Engineering Intern",
+            location="Austin, TX",
+            url="https://example.com/jobs/description-only",
+            source="Test",
+            description="Work on semiconductor manufacturing, yield, process, and equipment.",
+        )
+        self.assertIsNone(score_job(job))
+
+    def test_product_management_intern_is_excluded(self):
+        job = Job(
+            company="Example Semiconductor",
+            title="Product Management Intern",
+            location="Austin, TX",
+            url="https://example.com/jobs/product-management",
+            source="Test",
+        )
+        self.assertFalse(matches_target_role(job.title))
+        self.assertIsNone(score_job(job))
+
     def test_manufacturing_intern_scores_highly(self):
         job = Job(
             company="Example Semiconductor",
@@ -151,6 +237,213 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertIn("bachelor's", jobs[0].description)
         self.assertEqual(request_json_mock.call_count, 2)
+
+    @patch("scanner.request_json")
+    def test_eightfold_adapter_normalizes_public_positions(self, request_json_mock):
+        request_json_mock.return_value = {
+            "count": 1,
+            "positions": [
+                {
+                    "id": "EF-1",
+                    "name": "Yield Engineering Intern",
+                    "location": "Boise, ID, United States",
+                    "canonicalPositionUrl": "https://jobs.example.com/yield-intern",
+                    "t_create": 1780000000,
+                    "job_description": "Pursuing a bachelor's or master's degree.",
+                }
+            ],
+        }
+        source = {
+            "company": "Example Semiconductor",
+            "type": "eightfold",
+            "host": "example.eightfold.ai",
+            "search_terms": ["intern"],
+        }
+
+        jobs = Scanner().scan(source)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].external_id, "EF-1")
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_json")
+    def test_oracle_adapter_normalizes_candidate_experience_feed(self, request_json_mock):
+        request_json_mock.return_value = {
+            "items": [
+                {
+                    "TotalJobsCount": 1,
+                    "requisitionList": [
+                        {
+                            "Id": "1234",
+                            "Title": "Process Engineering Intern",
+                            "PrimaryLocation": "Dallas, TX, United States",
+                            "PostedDate": "2026-08-20",
+                            "ShortDescriptionStr": "Bachelor's or master's student.",
+                        }
+                    ],
+                }
+            ]
+        }
+        source = {
+            "company": "Example Semiconductor",
+            "type": "oracle",
+            "host": "careers.example.com",
+            "site": "CX",
+            "search_terms": ["intern"],
+        }
+
+        jobs = Scanner().scan(source)
+
+        self.assertEqual(jobs[0].title, "Process Engineering Intern")
+        self.assertIn("/sites/CX/job/1234/", jobs[0].url)
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_text")
+    def test_successfactors_rss_adapter_reads_location_and_degree_text(self, request_text_mock):
+        request_text_mock.return_value = """<?xml version="1.0"?>
+        <rss xmlns:g="http://base.google.com/ns/1.0"><channel><item>
+          <title>Equipment Engineering Co-op (Portland, OR, United States)</title>
+          <link>https://careers.example.com/job/1</link>
+          <guid>SF-1</guid>
+          <description>Pursuing a bachelor's or master's degree.</description>
+        </item></channel></rss>"""
+
+        jobs = Scanner().scan(
+            {
+                "company": "Example Semiconductor",
+                "type": "successfactors",
+                "feed_url": "https://careers.example.com/sitemal.xml",
+            }
+        )
+
+        self.assertEqual(jobs[0].location, "Portland, OR, United States")
+        self.assertEqual(jobs[0].title, "Equipment Engineering Co-op")
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_json")
+    def test_dayforce_adapter_keeps_structured_us_location(self, request_json_mock):
+        request_json_mock.return_value = {
+            "maxCount": 1,
+            "jobPostings": [
+                {
+                    "jobPostingId": "DF-1",
+                    "jobTitle": "Manufacturing Engineering Intern",
+                    "postingLocations": [{"city": "Bloomington", "state": "MN", "country": "US"}],
+                    "jobDescription": "Open to undergraduate students.",
+                }
+            ],
+        }
+
+        jobs = Scanner().scan(
+            {
+                "company": "Example Semiconductor",
+                "type": "dayforce",
+                "host": "jobs.dayforcehcm.com",
+                "client": "example",
+                "board": "CANDIDATEPORTAL",
+            }
+        )
+
+        self.assertIn("Bloomington", jobs[0].location)
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_text")
+    def test_static_adapter_splits_inficon_style_title_and_location(self, request_text_mock):
+        request_text_mock.return_value = (
+            '<a href="/en/career/process-engineering-intern">'
+            "Process Engineering Intern United States, NY, East Syracuse</a>"
+        )
+        jobs = Scanner().scan(
+            {
+                "company": "INFICON",
+                "type": "static",
+                "page_url": "https://www.inficon.com/en/careers/open-positions",
+                "anchor_href_pattern": "/career/",
+                "title_location_regex": (
+                    r"^(?P<title>.+?)\s+(?P<location>United States,\s*[A-Z]{2},\s*.+)$"
+                ),
+            }
+        )
+
+        self.assertEqual(jobs[0].title, "Process Engineering Intern")
+        self.assertEqual(jobs[0].location, "United States, NY, East Syracuse")
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_json")
+    def test_adp_myjobs_adapter_uses_public_career_token(self, request_json_mock):
+        request_json_mock.side_effect = [
+            {"myJobsToken": "public-token", "properties": {"myadpUrl": "https://api.adp.com"}},
+            {
+                "count": 1,
+                "jobRequisitions": [
+                    {
+                        "reqId": "ADP-1",
+                        "publishedJobTitle": "Test Engineering Intern",
+                        "postingLocations": [
+                            {
+                                "address": {
+                                    "cityName": "San Jose",
+                                    "countrySubdivisionLevel1": {"codeValue": "CA"},
+                                    "country": {"codeValue": "US"},
+                                }
+                            }
+                        ],
+                        "jobQualifications": "Currently pursuing a bachelor's degree.",
+                    }
+                ],
+            },
+        ]
+
+        jobs = Scanner().scan(
+            {
+                "company": "Advantest",
+                "type": "adp_myjobs",
+                "slug": "advantestcareers",
+            }
+        )
+
+        self.assertEqual(jobs[0].external_id, "ADP-1")
+        self.assertIn("San Jose", jobs[0].location)
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_json")
+    @patch("scanner.request_text_with_headers")
+    def test_csod_adapter_replays_public_bootstrap_token(self, text_mock, json_mock):
+        class Headers:
+            @staticmethod
+            def get_all(_name):
+                return ["session=abc; Path=/; Secure"]
+
+        text_mock.return_value = ('{"token":"anonymous.jwt"}', Headers())
+        json_mock.return_value = {
+            "data": {
+                "totalCount": 1,
+                "requisitions": [
+                    {
+                        "requisitionId": "CSOD-1",
+                        "displayJobTitle": "Process Engineering Intern",
+                        "postingEffectiveDate": "8/20/2026",
+                        "locations": [
+                            {"city": "Tonawanda", "state": "NY", "country": "United States"}
+                        ],
+                    }
+                ],
+            }
+        }
+        jobs = Scanner().scan(
+            {
+                "company": "Linde",
+                "type": "csod",
+                "host": "linde.csod.com",
+                "site_id": 23,
+                "corp": "linde",
+                "search_terms": ["intern"],
+            }
+        )
+
+        self.assertEqual(jobs[0].external_id, "CSOD-1")
+        self.assertIsNotNone(score_job(jobs[0]))
+        self.assertEqual(json_mock.call_args.kwargs["headers"]["Cookie"], "session=abc")
 
     def test_url_query_is_removed_from_identity(self):
         self.assertEqual(
