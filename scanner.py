@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Free semiconductor opportunity scanner for SCRO at UCF.
 
-The scanner reads public applicant-tracking-system feeds, scores early-career
-roles with a manufacturing preference, suppresses duplicates, and sends new
-matches to a Discord incoming webhook.
+The scanner reads public applicant-tracking-system feeds, keeps only targeted
+semiconductor internships/co-ops, suppresses duplicates, and sends new matches
+to a Discord incoming webhook.
 """
 
 from __future__ import annotations
@@ -17,12 +17,14 @@ import os
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
@@ -32,17 +34,36 @@ DEFAULT_STATE = ROOT / "seen_jobs.json"
 USER_AGENT = "SCRO-Opportunity-Bot/1.0 (+https://github.com/Mahkri-glitch/scro-opportunity-bot)"
 DISCORD_BOT_NAME = "Jensen Huang"
 
-EARLY_CAREER_PATTERNS = (
+INTERNSHIP_PATTERNS = (
     r"\bintern(ship)?\b",
     r"\bco[ -]?op\b",
-    r"\bstudent\b",
-    r"\buniversity\b",
-    r"\bapprentice(ship)?\b",
-    r"\bearly career\b",
-    r"\brecent (college )?graduate\b",
-    r"\bnew (college )?grad(uate)?\b",
-    r"\bgraduate (engineer|program|programme|rotation)\b",
-    r"\brotational program\b",
+)
+
+# Eligibility is deliberately title-only. Job descriptions often contain
+# generic semiconductor/manufacturing boilerplate that would otherwise allow
+# unrelated internships through the filter.
+TARGET_ROLE_PATTERNS = (
+    (r"\bprocess(?:es|ing)?\b", "Process"),
+    (r"\byield\b", "Yield"),
+    (r"\bmanufactur(?:e|ing)\b", "Manufacturing"),
+    (
+        r"\bproduct(?:\s*/\s*test)?\s+(?:engineer(?:ing)?|development|quality|reliability|test)\b",
+        "Product",
+    ),
+    (r"\bequipment\b", "Equipment"),
+    (r"\bmetrolog(?:y|ist)\b", "Metrology"),
+    (r"\bintegration\b", "Integration"),
+    (r"\blithograph(?:y|ic)\b", "Lithography"),
+    (r"\betch(?:ing)?\b", "Etch"),
+    (r"\bdeposition\b", "Deposition"),
+    (r"\bcvd\b", "CVD"),
+    (r"\bpvd\b", "PVD"),
+    (r"\bald\b", "ALD"),
+    (r"\bcmp\b", "CMP"),
+    (r"\bpackag(?:e|ing)\b", "Packaging"),
+    (r"\btest(?:ing)?\b", "Test"),
+    (r"\breliability\b", "Reliability"),
+    (r"\bsemiconductor(?:s)?\b", "Semiconductor"),
 )
 
 SENIOR_PATTERNS = (
@@ -116,6 +137,8 @@ EXCLUDED_FUNCTION_TERMS = (
     "legal",
     "sales intern",
     "marketing intern",
+    "product management",
+    "product manager",
     "real estate",
 )
 
@@ -323,6 +346,59 @@ def request_json(
         raise HttpRequestError(f"Request failed for {url}: {exc.reason}") from exc
 
 
+def request_text(
+    method: str,
+    url: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 25,
+) -> str:
+    """Request a public HTML/XML page without adding a paid API dependency."""
+    text, _ = request_text_with_headers(
+        method,
+        url,
+        payload=payload,
+        params=params,
+        headers=headers,
+        timeout=timeout,
+    )
+    return text
+
+
+def request_text_with_headers(
+    method: str,
+    url: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 25,
+) -> tuple[str, Any]:
+    if params:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}{urlencode(params)}"
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
+    }
+    if payload is not None:
+        request_headers["Content-Type"] = "application/json"
+    request_headers.update(headers or {})
+    request = Request(url, data=body, headers=request_headers, method=method.upper())
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.read().decode(charset, errors="replace"), response.headers
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise HttpRequestError(f"HTTP {exc.code} from {url}: {detail}") from exc
+    except URLError as exc:
+        raise HttpRequestError(f"Request failed for {url}: {exc.reason}") from exc
+
+
 def canonical_url(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
@@ -336,6 +412,17 @@ def clean_text(value: Any) -> str:
 
 def matches_any(text: str, patterns: Iterable[str]) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
+def target_role_tags(title: str) -> tuple[str, ...]:
+    """Return qualifying semiconductor-function tags found in a job title."""
+    return tuple(
+        tag for pattern, tag in TARGET_ROLE_PATTERNS if re.search(pattern, title, re.IGNORECASE)
+    )
+
+
+def matches_target_role(title: str) -> bool:
+    return bool(target_role_tags(title))
 
 
 def contains_country_code(text: str, codes: Iterable[str]) -> bool:
@@ -384,7 +471,12 @@ def score_job(job: Job, us_only: bool = True) -> RankedJob | None:
     combined = f"{title} {clean_text(job.description)[:2500]}".casefold()
     title_lower = title.casefold()
 
-    if not matches_any(title, EARLY_CAREER_PATTERNS):
+    if not matches_any(title, INTERNSHIP_PATTERNS):
+        return None
+    role_tags = target_role_tags(title)
+    if not role_tags:
+        return None
+    if any(term in title_lower for term in EXCLUDED_FUNCTION_TERMS):
         return None
     if matches_any(title, SENIOR_PATTERNS) and "intern" not in title_lower:
         return None
@@ -395,8 +487,10 @@ def score_job(job: Job, us_only: bool = True) -> RankedJob | None:
     if us_only and not is_us_based(title, job.location):
         return None
 
-    score = 5
-    tags: list[str] = [opportunity_type(title)]
+    # Every title that reaches this point satisfies both hard eligibility gates.
+    # Seven is therefore the minimum qualifying score before preference boosts.
+    score = 7
+    tags: list[str] = [opportunity_type(title), *role_tags]
 
     if matches_any(combined, BACHELOR_PATTERNS):
         score += 4
@@ -419,8 +513,6 @@ def score_job(job: Job, us_only: bool = True) -> RankedJob | None:
             if tag not in tags:
                 tags.append(tag)
 
-    if any(term in title_lower for term in EXCLUDED_FUNCTION_TERMS):
-        score -= 8
     if any(term in job.location.casefold() for term in FLORIDA_TERMS):
         score += 3
         tags.append("Florida")
@@ -444,10 +536,6 @@ def opportunity_type(title: str) -> str:
     lowered = title.casefold()
     if "co-op" in lowered or "coop" in lowered or "co op" in lowered:
         return "Co-op"
-    if "apprent" in lowered:
-        return "Apprenticeship"
-    if "graduate" in lowered or "early career" in lowered or "rotation" in lowered:
-        return "New Grad"
     return "Internship"
 
 
@@ -491,6 +579,67 @@ def tag_for_term(term: str) -> str:
     return mapping.get(term, term.title())
 
 
+def first_clean(mapping: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and clean_text(value):
+            return clean_text(value)
+    return ""
+
+
+def xml_text(element: ET.Element, *names: str) -> str:
+    wanted = {name.casefold() for name in names}
+    for child in element.iter():
+        local_name = child.tag.rsplit("}", 1)[-1].casefold()
+        if local_name in wanted and child.text and child.text.strip():
+            return clean_text(child.text)
+    return ""
+
+
+def split_trailing_location(title: str) -> tuple[str, str]:
+    match = re.match(r"^(?P<title>.+?)\s*\((?P<location>[^()]+)\)\s*$", title)
+    if not match:
+        return title, ""
+    location = clean_text(match.group("location"))
+    if "," not in location and not has_explicit_us_location(location) and not has_non_us_marker(location):
+        return title, ""
+    return clean_text(match.group("title")), location
+
+
+def structured_location(item: dict[str, Any], fields: Iterable[str]) -> str:
+    values: list[str] = []
+    for field in fields:
+        raw = item.get(field)
+        entries = raw if isinstance(raw, list) else ([raw] if raw else [])
+        for entry in entries:
+            if isinstance(entry, str):
+                label = clean_text(entry)
+            elif isinstance(entry, dict):
+                name_code = entry.get("nameCode") if isinstance(entry.get("nameCode"), dict) else {}
+                address = entry.get("address") if isinstance(entry.get("address"), dict) else entry
+                state_data = (
+                    address.get("countrySubdivisionLevel1")
+                    if isinstance(address.get("countrySubdivisionLevel1"), dict)
+                    else {}
+                )
+                country_data = address.get("country") if isinstance(address.get("country"), dict) else {}
+                parts = [
+                    first_clean(entry, "displayName", "locationName", "name"),
+                    first_clean(name_code, "shortName", "longName"),
+                    first_clean(address, "cityName", "city"),
+                    first_clean(state_data, "codeValue", "longName"),
+                    first_clean(address, "state", "province"),
+                    first_clean(country_data, "codeValue", "longName"),
+                    first_clean(address, "country"),
+                ]
+                label = ", ".join(part for part in parts if part)
+            else:
+                label = ""
+            if label and label.casefold() not in {value.casefold() for value in values}:
+                values.append(label)
+    return " / ".join(values)
+
+
 class Scanner:
     def __init__(self, timeout: int = 25) -> None:
         self.timeout = timeout
@@ -505,6 +654,24 @@ class Scanner:
             return self._lever(source)
         if source_type == "ashby":
             return self._ashby(source)
+        if source_type == "eightfold":
+            return self._eightfold(source)
+        if source_type == "oracle":
+            return self._oracle(source)
+        if source_type == "successfactors":
+            return self._successfactors(source)
+        if source_type == "dayforce":
+            return self._dayforce(source)
+        if source_type == "icims":
+            return self._icims(source)
+        if source_type == "adp_workforcenow":
+            return self._adp_workforcenow(source)
+        if source_type == "adp_myjobs":
+            return self._adp_myjobs(source)
+        if source_type == "csod":
+            return self._csod(source)
+        if source_type == "static":
+            return self._static(source)
         raise ValueError(f"Unsupported source type: {source_type!r}")
 
     def _workday(self, source: dict[str, Any]) -> list[Job]:
@@ -512,7 +679,7 @@ class Scanner:
         tenant = source["tenant"]
         site = source["site"]
         endpoint = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
-        terms = source.get("search_terms", ["intern", "co-op", "early career"])
+        terms = source.get("search_terms", ["intern", "co-op"])
         jobs: dict[str, Job] = {}
         external_paths: dict[str, str] = {}
 
@@ -560,7 +727,8 @@ class Scanner:
             candidates = [
                 job
                 for job in jobs.values()
-                if matches_any(job.title, EARLY_CAREER_PATTERNS)
+                if matches_any(job.title, INTERNSHIP_PATTERNS)
+                and matches_target_role(job.title)
                 and not has_non_us_marker(f"{job.title} {job.location}")
             ]
             candidates.sort(
@@ -665,6 +833,693 @@ class Scanner:
                 )
             )
         return jobs
+
+    def _eightfold(self, source: dict[str, Any]) -> list[Job]:
+        host = source["host"].strip().rstrip("/")
+        domain = source.get("domain", "").strip()
+        terms = source.get("search_terms", ["intern", "co-op"])
+        max_pages = int(source.get("max_pages_per_term", 30))
+        jobs: dict[str, Job] = {}
+
+        for term in terms:
+            for page in range(max_pages):
+                start = page * 10
+                params = {
+                    "query": term,
+                    "start": str(start),
+                    "num": "10",
+                    "sort_by": "timestamp",
+                }
+                if domain:
+                    params["domain"] = domain
+                data = request_json(
+                    "GET",
+                    f"https://{host}/api/apply/v2/jobs",
+                    params=params,
+                    timeout=self.timeout,
+                )
+                positions = data.get("positions", [])
+                if not isinstance(positions, list) or not positions:
+                    break
+                for item in positions:
+                    if not isinstance(item, dict):
+                        continue
+                    external_id = first_clean(item, "id", "display_job_id")
+                    canonical = first_clean(item, "canonicalPositionUrl", "position_url", "public_url")
+                    if canonical and not canonical.startswith("https://"):
+                        canonical = ""
+                    url = canonical or (
+                        f"https://{host}/careers?{urlencode({'pid': external_id, **({'domain': domain} if domain else {})})}"
+                        if external_id
+                        else ""
+                    )
+                    location_parts: list[str] = []
+                    direct_location = clean_text(item.get("location"))
+                    if direct_location:
+                        location_parts.append(direct_location)
+                    for location in item.get("locations", []) if isinstance(item.get("locations"), list) else []:
+                        cleaned = clean_text(location)
+                        if cleaned and cleaned not in location_parts:
+                            location_parts.append(cleaned)
+                    timestamp = item.get("t_create") or item.get("t_update")
+                    try:
+                        posted = datetime.fromtimestamp(float(timestamp), timezone.utc).date().isoformat()
+                    except (TypeError, ValueError, OSError):
+                        posted = ""
+                    job = Job(
+                        company=source["company"],
+                        title=first_clean(item, "name", "posting_name"),
+                        location=" / ".join(location_parts),
+                        url=url,
+                        source="Eightfold",
+                        external_id=external_id,
+                        posted=posted,
+                        description=" ".join(
+                            filter(
+                                None,
+                                [
+                                    first_clean(item, "department"),
+                                    first_clean(item, "business_unit"),
+                                    first_clean(item, "job_description", "description"),
+                                ],
+                            )
+                        ),
+                    )
+                    if job.url and job.title:
+                        jobs[job.stable_id] = job
+                count = int(data.get("count", 0) or 0)
+                if len(positions) < 10 or (count and start + len(positions) >= count):
+                    break
+        return list(jobs.values())
+
+    def _oracle(self, source: dict[str, Any]) -> list[Job]:
+        host = source["host"].strip().rstrip("/")
+        site = source["site"]
+        endpoint = f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+        terms = source.get("search_terms", ["intern", "co-op"])
+        limit = min(100, int(source.get("page_size", 100)))
+        max_results = int(source.get("max_results_per_term", 200))
+        jobs: dict[str, Job] = {}
+
+        for term in terms:
+            offset = 0
+            while offset < max_results:
+                finder = (
+                    f"findReqs;siteNumber={site},keyword={term},"
+                    "facetsList=LOCATIONS;WORK_LOCATIONS;WORKPLACE_TYPES;TITLES;"
+                    "CATEGORIES;ORGANIZATIONS;POSTING_DATES;FLEX_FIELDS,"
+                    f"limit={limit},offset={offset},sortBy=POSTING_DATES_DESC"
+                )
+                data = request_json(
+                    "GET",
+                    endpoint,
+                    params={
+                        "onlyData": "true",
+                        "expand": (
+                            "requisitionList.workLocation,requisitionList.otherWorkLocations,"
+                            "requisitionList.secondaryLocations,requisitionList.requisitionFlexFields"
+                        ),
+                        "finder": finder,
+                    },
+                    timeout=self.timeout,
+                )
+                wrapper = (data.get("items") or [{}])[0] if isinstance(data, dict) else {}
+                postings = wrapper.get("requisitionList", []) if isinstance(wrapper, dict) else []
+                if not isinstance(postings, list) or not postings:
+                    break
+                for item in postings:
+                    if not isinstance(item, dict):
+                        continue
+                    external_id = first_clean(item, "Id", "id", "RequisitionNumber")
+                    direct_url = first_clean(item, "ExternalUrl", "externalUrl", "ExternalUrlSeo")
+                    url = direct_url if direct_url.startswith("http") else (
+                        f"https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{external_id}/"
+                        if external_id
+                        else ""
+                    )
+                    location = first_clean(item, "PrimaryLocation", "primaryLocation", "Location")
+                    if not location:
+                        location = structured_location(
+                            item,
+                            ("workLocation", "otherWorkLocations", "secondaryLocations"),
+                        )
+                    job = Job(
+                        company=source["company"],
+                        title=first_clean(item, "Title", "title"),
+                        location=location,
+                        url=url,
+                        source="Oracle Recruiting",
+                        external_id=external_id,
+                        posted=first_clean(item, "PostedDate", "postedDate"),
+                        description=" ".join(
+                            filter(
+                                None,
+                                [
+                                    first_clean(item, "ShortDescriptionStr", "shortDescription"),
+                                    first_clean(item, "ExternalDescriptionStr", "externalDescription"),
+                                    first_clean(item, "Category", "Organization"),
+                                ],
+                            )
+                        ),
+                    )
+                    if job.url and job.title:
+                        jobs[job.stable_id] = job
+                offset += len(postings)
+                total = int(wrapper.get("TotalJobsCount", offset) or offset)
+                if len(postings) < limit or offset >= total:
+                    break
+        return list(jobs.values())
+
+    def _successfactors(self, source: dict[str, Any]) -> list[Job]:
+        if source.get("legacy_company_id"):
+            host = source["host"].strip().rstrip("/")
+            company_id = source["legacy_company_id"]
+            feed_url = f"https://{host}/career"
+            xml_source = request_text(
+                "GET",
+                feed_url,
+                params={
+                    "company": company_id,
+                    "career_ns": "job_listing_summary",
+                    "resultType": "XML",
+                    "rcm_site_locale": source.get("locale", "en_US"),
+                },
+                timeout=self.timeout,
+            )
+        else:
+            feed_url = source["feed_url"]
+            company_id = ""
+            xml_source = request_text("GET", feed_url, timeout=self.timeout)
+
+        try:
+            root = ET.fromstring(xml_source)
+        except ET.ParseError as exc:
+            raise HttpRequestError(f"Malformed SuccessFactors XML from {feed_url}: {exc}") from exc
+
+        jobs: list[Job] = []
+        is_legacy = root.tag.rsplit("}", 1)[-1].casefold() == "job-listing"
+        items = list(root.findall("./Job")) if is_legacy else list(root.iter("item"))
+        for item in items:
+            if is_legacy:
+                external_id = xml_text(item, "ReqId")
+                title, title_location = split_trailing_location(xml_text(item, "JobTitle"))
+                location = xml_text(item, "Location") or title_location
+                if not location:
+                    labeled_values: dict[str, str] = {}
+                    for child in item:
+                        label = xml_text(child, "label")
+                        value = xml_text(child, "value")
+                        if label and value:
+                            labeled_values[label.casefold()] = value
+                    location = next(
+                        (value for label, value in labeled_values.items() if "location" in label),
+                        "",
+                    )
+                url = (
+                    f"https://{source['host']}/sfcareer/jobreqcareer?"
+                    f"{urlencode({'jobId': external_id, 'company': company_id})}"
+                )
+                posted = xml_text(item, "Posted-Date")
+                description = " ".join(clean_text(child.text) for child in item if child.text)
+            else:
+                title, title_location = split_trailing_location(xml_text(item, "title"))
+                url = xml_text(item, "link")
+                external_id = xml_text(item, "id", "guid") or canonical_url(url)
+                location = xml_text(item, "location") or title_location
+                posted = xml_text(item, "pubDate", "postDate", "publishedDate", "date")
+                description = xml_text(item, "description", "job_function")
+            if title and url:
+                jobs.append(
+                    Job(
+                        company=source["company"],
+                        title=title,
+                        location=location,
+                        url=url,
+                        source="SuccessFactors",
+                        external_id=external_id,
+                        posted=posted,
+                        description=description,
+                    )
+                )
+        return jobs
+
+    def _dayforce(self, source: dict[str, Any]) -> list[Job]:
+        host = source.get("host", "jobs.dayforcehcm.com").strip().rstrip("/")
+        client = source["client"]
+        board = source.get("board", "CANDIDATEPORTAL")
+        culture = source.get("culture", "en-US")
+        endpoint = f"https://{host}/api/geo/{client}/jobposting/search"
+        board_url = f"https://{host}/{culture}/{client}/{board}"
+        page_size = 25
+        max_pages = int(source.get("max_pages", 10))
+        jobs: dict[str, Job] = {}
+
+        for page in range(max_pages):
+            data = request_json(
+                "POST",
+                endpoint,
+                payload={
+                    "clientNamespace": client,
+                    "jobBoardCode": board,
+                    "cultureCode": culture,
+                    "distanceUnit": 0,
+                    "paginationStart": page * page_size,
+                },
+                headers={"Origin": f"https://{host}", "Referer": board_url},
+                timeout=self.timeout,
+            )
+            candidates = (
+                data.get("jobPostings")
+                or data.get("jobPostingSummaries")
+                or (data.get("searchResult") or {}).get("jobPostings")
+                or (data.get("result") or {}).get("jobPostings")
+                or []
+            )
+            if not isinstance(candidates, list) or not candidates:
+                break
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                external_id = first_clean(
+                    item,
+                    "jobPostingId",
+                    "postingId",
+                    "id",
+                    "externalJobPostingId",
+                    "jobId",
+                    "requisitionId",
+                )
+                direct_url = first_clean(item, "jobPostingUrl", "jobUrl", "applyUrl", "url")
+                url = urljoin(board_url + "/", direct_url) if direct_url else (
+                    f"{board_url}/jobs/{external_id}" if external_id else ""
+                )
+                location = first_clean(
+                    item,
+                    "location",
+                    "locationName",
+                    "locationString",
+                    "postingLocation",
+                    "displayLocation",
+                    "jobLocation",
+                    "cityState",
+                ) or structured_location(item, ("postingLocations", "locations", "locationAddress", "address"))
+                job = Job(
+                    company=source["company"],
+                    title=first_clean(item, "jobTitle", "title", "postingTitle", "requisitionTitle"),
+                    location=location,
+                    url=url,
+                    source="Dayforce",
+                    external_id=external_id,
+                    posted=first_clean(
+                        item,
+                        "postingStartTimestampUTC",
+                        "postingStartDateUTC",
+                        "postingDate",
+                        "postedDate",
+                        "publishDate",
+                    ),
+                    description=first_clean(
+                        item,
+                        "jobDescription",
+                        "description",
+                        "fullDescription",
+                        "shortDescription",
+                        "overview",
+                    ),
+                )
+                if job.title and job.url:
+                    jobs[job.stable_id] = job
+            total = int(data.get("maxCount", data.get("totalCount", 0)) or 0)
+            if len(candidates) < page_size or (total and (page + 1) * page_size >= total):
+                break
+        return list(jobs.values())
+
+    def _icims(self, source: dict[str, Any]) -> list[Job]:
+        host = source["host"].strip().rstrip("/")
+        current_url = f"https://{host}/jobs/search?ss=1&in_iframe=1"
+        max_pages = int(source.get("max_pages", 10))
+        jobs: dict[str, Job] = {}
+        seen_pages: set[str] = set()
+
+        for _ in range(max_pages):
+            if current_url in seen_pages:
+                break
+            seen_pages.add(current_url)
+            page_html = request_text("GET", current_url, timeout=self.timeout)
+            card_pattern = re.compile(
+                r"<li[^>]*class=[\"'][^\"']*iCIMS_JobCardItem[^\"']*[\"'][^>]*>"
+                r"([\s\S]*?)</li>",
+                re.IGNORECASE,
+            )
+            cards = card_pattern.findall(page_html)
+            segments = cards or [page_html]
+            for card in segments:
+                links = re.findall(
+                    r"<a[^>]*href=[\"']([^\"']*/jobs/\d+[^\"']*)[\"'][^>]*>"
+                    r"([\s\S]*?)</a>",
+                    card,
+                    re.IGNORECASE,
+                )
+                for href, link_body in links:
+                    if "/jobs/intro" in href.casefold():
+                        continue
+                    url = urljoin(f"https://{host}/", html.unescape(href))
+                    title_match = re.search(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", link_body, re.I)
+                    title = clean_text(title_match.group(1) if title_match else link_body)
+                    location_match = re.search(
+                        r"field-label[\"']?>\s*Location\s*</span>[\s\S]*?"
+                        r"iCIMS_JobHeaderData[^>]*>\s*<span[^>]*>([\s\S]*?)</span>",
+                        card,
+                        re.IGNORECASE,
+                    )
+                    if not location_match:
+                        location_match = re.search(
+                            r"glyphicons-map-marker[\s\S]*?<dd[^>]*>\s*<span[^>]*>([\s\S]*?)</span>",
+                            card,
+                            re.IGNORECASE,
+                        )
+                    posted_match = re.search(
+                        r"field-label[\"']?>\s*Date Posted\s*</span>[\s\S]*?"
+                        r"(?:title=[\"']([^\"']+)[\"'])?[^>]*>\s*([^<]*)",
+                        card,
+                        re.IGNORECASE,
+                    )
+                    id_match = re.search(r"/jobs/(\d+)", url)
+                    job = Job(
+                        company=source["company"],
+                        title=title,
+                        location=clean_text(location_match.group(1) if location_match else ""),
+                        url=url,
+                        source="iCIMS",
+                        external_id=id_match.group(1) if id_match else canonical_url(url),
+                        posted=clean_text(
+                            (posted_match.group(1) or posted_match.group(2)) if posted_match else ""
+                        ),
+                        description=clean_text(card),
+                    )
+                    if job.title and job.url:
+                        jobs[job.stable_id] = job
+
+            next_match = re.search(
+                r"<link[^>]*(?:rel=[\"']next[\"'][^>]*href|href)=[\"']([^\"']+)[\"']"
+                r"[^>]*(?:rel=[\"']next[\"'])?",
+                page_html,
+                re.IGNORECASE,
+            )
+            if not next_match:
+                break
+            next_url = urljoin(current_url, html.unescape(next_match.group(1)))
+            separator = "&" if "?" in next_url else "?"
+            current_url = next_url if "in_iframe=" in next_url else f"{next_url}{separator}in_iframe=1"
+        return list(jobs.values())
+
+    def _adp_workforcenow(self, source: dict[str, Any]) -> list[Job]:
+        cid = source["cid"]
+        cc_id = source["cc_id"]
+        api_base = "https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1"
+        board_url = (
+            "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?"
+            f"{urlencode({'cid': cid, 'ccId': cc_id, 'lang': 'en_US'})}"
+        )
+        data = request_json(
+            "GET",
+            f"{api_base}/job-requisitions",
+            params={"cid": cid, "ccId": cc_id},
+            timeout=self.timeout,
+        )
+        jobs: list[Job] = []
+        for item in data.get("jobRequisitions", []):
+            if not isinstance(item, dict):
+                continue
+            external_id = first_clean(item, "itemID")
+            direct_url = ""
+            for link in item.get("links", []) if isinstance(item.get("links"), list) else []:
+                if isinstance(link, dict) and link.get("href"):
+                    direct_url = urljoin(board_url, str(link["href"]))
+                    break
+            jobs.append(
+                Job(
+                    company=source["company"],
+                    title=first_clean(item, "requisitionTitle"),
+                    location=structured_location(item, ("requisitionLocations",)),
+                    url=direct_url or f"{board_url}&jobId={external_id}",
+                    source="ADP Workforce Now",
+                    external_id=external_id,
+                    posted=first_clean(item, "postDate"),
+                    description=first_clean(item, "requisitionDescription"),
+                )
+            )
+        return jobs
+
+    def _adp_myjobs(self, source: dict[str, Any]) -> list[Job]:
+        slug = source["slug"]
+        board_url = f"https://myjobs.adp.com/{slug}/cx/job-listing"
+        career_site = request_json(
+            "GET",
+            f"https://myjobs.adp.com/public/staffing/v1/career-site/{slug}",
+            timeout=self.timeout,
+        )
+        token = first_clean(career_site, "myJobsToken")
+        properties = career_site.get("properties") if isinstance(career_site.get("properties"), dict) else {}
+        api_origin = first_clean(properties, "myadpUrl").rstrip("/")
+        if not token or not api_origin:
+            raise HttpRequestError(f"ADP MyJobs did not expose its public token for {slug}")
+
+        jobs: dict[str, Job] = {}
+        page_size = 100
+        max_pages = int(source.get("max_pages", 10))
+        for page in range(max_pages):
+            data = request_json(
+                "GET",
+                f"{api_origin}/myadp_prefix/mycareer/public/staffing/v1/"
+                "job-requisitions/apply-custom-filters",
+                params={
+                    "$select": (
+                        "reqId,jobTitle,publishedJobTitle,type,jobDescription,jobQualifications,"
+                        "workLocations,clientRequisitionID,postingDate,requisitionLocations,"
+                        "postingLocations,organizationalUnits"
+                    ),
+                    "$top": str(page_size),
+                    "$skip": str(page * page_size),
+                    "$filter": "",
+                    "radius": "25",
+                    "tz": "America/New_York",
+                },
+                headers={
+                    "myjobstoken": token,
+                    "rolecode": "manager",
+                    "Origin": "https://myjobs.adp.com",
+                    "Referer": board_url,
+                },
+                timeout=self.timeout,
+            )
+            postings = data.get("jobRequisitions", [])
+            if not isinstance(postings, list) or not postings:
+                break
+            for item in postings:
+                if not isinstance(item, dict):
+                    continue
+                external_id = first_clean(item, "reqId", "clientRequisitionID")
+                job = Job(
+                    company=source["company"],
+                    title=first_clean(item, "publishedJobTitle", "jobTitle"),
+                    location=structured_location(
+                        item,
+                        ("requisitionLocations", "workLocations", "postingLocations"),
+                    ),
+                    url=(
+                        first_clean(item, "url", "jobUrl")
+                        or f"https://myjobs.adp.com/{slug}/cx/job-details?reqId={external_id}"
+                    ),
+                    source="ADP MyJobs",
+                    external_id=external_id,
+                    posted=first_clean(item, "postingDate"),
+                    description=" ".join(
+                        filter(
+                            None,
+                            [
+                                first_clean(item, "jobDescription"),
+                                first_clean(item, "jobQualifications"),
+                                " ".join(
+                                    first_clean(unit, "name")
+                                    or first_clean(
+                                        unit.get("nameCode", {}) if isinstance(unit, dict) else {},
+                                        "longName",
+                                    )
+                                    for unit in item.get("organizationalUnits", [])
+                                    if isinstance(unit, dict)
+                                ),
+                            ],
+                        )
+                    ),
+                )
+                if job.title and job.url:
+                    jobs[job.stable_id] = job
+            total = int(data.get("count", 0) or 0)
+            if len(postings) < page_size or (total and (page + 1) * page_size >= total):
+                break
+        return list(jobs.values())
+
+    def _csod(self, source: dict[str, Any]) -> list[Job]:
+        host = source["host"].strip().rstrip("/")
+        site_id = int(source["site_id"])
+        corp = source.get("corp", host.split(".", 1)[0])
+        home_url = f"https://{host}/ux/ats/careersite/{site_id}/home?c={corp}"
+        bootstrap, response_headers = request_text_with_headers(
+            "GET",
+            home_url,
+            timeout=self.timeout,
+        )
+        token_match = re.search(r'"token"\s*:\s*"([A-Za-z0-9._-]+)"', bootstrap)
+        if not token_match:
+            raise HttpRequestError(f"Cornerstone did not expose an anonymous token for {host}")
+        token = token_match.group(1)
+
+        cookie_pairs: dict[str, str] = {}
+        set_cookies = response_headers.get_all("Set-Cookie") if hasattr(response_headers, "get_all") else []
+        for raw_cookie in set_cookies or []:
+            pair = raw_cookie.split(";", 1)[0].strip()
+            if "=" in pair:
+                name, value = pair.split("=", 1)
+                if name.strip():
+                    cookie_pairs[name.strip()] = value.strip()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Referer": home_url,
+        }
+        if cookie_pairs:
+            headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookie_pairs.items())
+
+        jobs: dict[str, Job] = {}
+        page_size = 25
+        max_pages = int(source.get("max_pages_per_term", 20))
+        terms = source.get("search_terms", ["intern", "co-op"])
+        endpoint = f"https://{host}/services/x/career-site/v1/search"
+        for term in terms:
+            for page in range(1, max_pages + 1):
+                data = request_json(
+                    "POST",
+                    endpoint,
+                    payload={
+                        "careerSiteId": site_id,
+                        "careerSitePageId": site_id,
+                        "pageNumber": page,
+                        "pageSize": page_size,
+                        "cultureId": 1,
+                        "cultureName": "en-US",
+                        "searchText": term,
+                        "states": [],
+                        "countryCodes": [],
+                        "cities": [],
+                        "placeID": "",
+                        "radius": None,
+                        "postingsWithinDays": None,
+                        "customFieldCheckboxKeys": [],
+                        "customFieldDropdowns": [],
+                        "customFieldRadios": [],
+                    },
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                wrapper = data.get("data", {}) if isinstance(data, dict) else {}
+                requisitions = wrapper.get("requisitions", []) if isinstance(wrapper, dict) else []
+                if not isinstance(requisitions, list) or not requisitions:
+                    break
+                for item in requisitions:
+                    if not isinstance(item, dict):
+                        continue
+                    external_id = first_clean(item, "requisitionId")
+                    locations: list[str] = []
+                    for location in item.get("locations", []) if isinstance(item.get("locations"), list) else []:
+                        if not isinstance(location, dict):
+                            continue
+                        label = ", ".join(
+                            filter(
+                                None,
+                                [
+                                    first_clean(location, "city"),
+                                    first_clean(location, "state"),
+                                    first_clean(location, "country"),
+                                ],
+                            )
+                        )
+                        if label and label not in locations:
+                            locations.append(label)
+                    job = Job(
+                        company=source["company"],
+                        title=clean_text(item.get("displayJobTitle")),
+                        location=" / ".join(locations),
+                        url=(
+                            f"https://{host}/ux/ats/careersite/{site_id}/home/requisition/"
+                            f"{external_id}?c={corp}"
+                        ),
+                        source="Cornerstone",
+                        external_id=external_id,
+                        posted=first_clean(item, "postingEffectiveDate"),
+                    )
+                    if job.title and external_id:
+                        jobs[job.stable_id] = job
+                total = int(wrapper.get("totalCount", 0) or 0)
+                if len(requisitions) < page_size or (total and page * page_size >= total):
+                    break
+        return list(jobs.values())
+
+    def _static(self, source: dict[str, Any]) -> list[Job]:
+        page_url = source["page_url"]
+        page_html = request_text("GET", page_url, timeout=self.timeout)
+        jobs: dict[str, Job] = {}
+        href_pattern = re.compile(source.get("anchor_href_pattern", r".+"), re.IGNORECASE)
+        title_location_pattern = (
+            re.compile(source["title_location_regex"], re.IGNORECASE)
+            if source.get("title_location_regex")
+            else None
+        )
+        default_location = source.get("default_location", "")
+
+        for href, body in re.findall(
+            r"<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)</a>",
+            page_html,
+            re.IGNORECASE,
+        ):
+            absolute_url = urljoin(page_url, html.unescape(href))
+            if not href_pattern.search(absolute_url):
+                continue
+            title = clean_text(body)
+            location = default_location
+            if title_location_pattern:
+                match = title_location_pattern.search(title)
+                if not match:
+                    location = ""
+                else:
+                    title = clean_text(match.groupdict().get("title", title))
+                    location = clean_text(match.groupdict().get("location", location))
+            if title:
+                job = Job(
+                    company=source["company"],
+                    title=title,
+                    location=location,
+                    url=absolute_url,
+                    source="Official careers page",
+                    external_id=f"{title}|{canonical_url(absolute_url)}",
+                )
+                jobs[job.stable_id] = job
+
+        if source.get("include_headings", False):
+            for body in re.findall(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", page_html, re.IGNORECASE):
+                title = clean_text(body)
+                if not title:
+                    continue
+                job = Job(
+                    company=source["company"],
+                    title=title,
+                    location=default_location,
+                    url=page_url,
+                    source="Official careers page",
+                    external_id=title,
+                )
+                jobs[job.stable_id] = job
+        return list(jobs.values())
 
 
 def load_json(path: Path, default: Any) -> Any:
