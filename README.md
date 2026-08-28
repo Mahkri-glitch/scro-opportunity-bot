@@ -1,18 +1,20 @@
 # SCRO Opportunity Bot
 
 A free Discord alert system for the Semiconductor Career Readiness Organization
-at UCF. It scans public employer job feeds every day and prioritizes internships,
-co-ops, apprenticeships, and new-graduate programs connected to semiconductor
-manufacturing.
+at UCF. It scans public employer job feeds every day and keeps only targeted
+semiconductor internships and co-ops.
 
-## What it prioritizes
+## What it allows
 
-- Process, process-integration, yield, product, and manufacturing engineering
-- Semiconductor equipment, field service, metrology, and failure analysis
-- Deposition, lithography, etch, CMP, implant, diffusion, and epitaxy
-- Packaging, test, reliability, facilities, automation, and process control
-- Relevant electrical, mechanical, materials, chemical, industrial, hardware,
-  supply-chain, and technician opportunities
+- The title must say **intern/internship** or **co-op**
+- The title must also contain at least one target area: process, yield,
+  manufacturing, product engineering, equipment, metrology, integration,
+  lithography, etch, deposition, CVD, PVD, ALD, CMP, packaging, test,
+  reliability, or semiconductor
+- Generic internships are rejected even when their descriptions contain
+  semiconductor or manufacturing boilerplate
+- Product-management roles are rejected; “product” qualifies only in an
+  engineering, development, quality, reliability, or test context
 - Roles explicitly open to bachelor's and master's students receive an
   additional ranking boost; PhD/postdoctoral-only titles are excluded
 - Florida opportunities receive an additional ranking boost
@@ -21,10 +23,23 @@ Only roles with an explicitly identifiable U.S. location are eligible. Country
 names in either the title or location are checked, and blank, vague, or
 country-unspecified remote locations are excluded.
 
-The bot currently scans verified public Workday feeds for Applied Materials,
-KLA, Intel, Micron, GlobalFoundries, Analog Devices, and NXP. The scanner also
-contains reusable adapters for Greenhouse, Lever, and Ashby so more employers
-can be added without changing Python code.
+The bot now monitors all 36 requested companies through their official public
+career systems:
+
+- Equipment and metrology: Applied Materials, Lam Research, KLA, ASML, ASM
+  International, Tokyo Electron, Onto Innovation, Axcelis Technologies, Veeco,
+  MKS Instruments, and INFICON
+- Chip manufacturing: Intel, Micron, GlobalFoundries, TSMC, Samsung
+  Semiconductor, Texas Instruments, Wolfspeed, SkyWater Technology, onsemi,
+  Analog Devices, Infineon, STMicroelectronics, NXP, and Qorvo
+- Packaging and test: Amkor, ASE, Teradyne, and Advantest
+- Materials and gases: Entegris, Air Products, Air Liquide, Linde, FUJIFILM
+  Electronic Materials, Shin-Etsu, and GlobalWafers
+
+The scanner supports Workday, Greenhouse, Lever, Ashby, Eightfold, Oracle
+Recruiting, SuccessFactors, Dayforce, iCIMS, ADP Workforce Now, ADP MyJobs,
+Cornerstone, and official server-rendered career pages. No paid search service
+or AI API is required.
 
 ## Cost
 
@@ -84,7 +99,7 @@ tracking system.
   "tenant": "example",
   "site": "External",
   "type": "workday",
-  "search_terms": ["intern", "co-op", "early career"],
+  "search_terms": ["intern", "co-op"],
   "max_results_per_term": 80
 }
 ```
@@ -121,6 +136,10 @@ tracking system.
   "board_name": "example"
 }
 ```
+
+The other source formats used by the 36-company list are already represented
+in `companies.json`; copy the closest entry when adding another employer that
+uses the same applicant-tracking system.
 
 An invalid employer source does not stop the complete scan. The workflow logs a
 warning and continues with the remaining sources. If every source fails, the
