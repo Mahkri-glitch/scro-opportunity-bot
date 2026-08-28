@@ -20,7 +20,7 @@
       "company": "Lam Research",
       "domain": "lamresearch.com",
       "enabled": true,
-      "host": "lamresearch.eightfold.ai",
+      "host": "careers.lamresearch.com",
       "max_pages_per_term": 30,
       "search_terms": ["intern", "co-op"],
       "type": "eightfold"
@@ -102,6 +102,7 @@
       "company": "INFICON",
       "enabled": true,
       "page_url": "https://www.inficon.com/en/careers/work-at-inficon/open-positions",
+      "reader_fallback_url": "https://r.jina.ai/http://www.inficon.com/en/careers/work-at-inficon/open-positions",
       "title_location_regex": "^(?P<title>.+?)\\s+(?P<location>United States,\\s*[A-Z]{2},\\s*.+)$",
       "type": "static"
     },
@@ -154,7 +155,7 @@
     {
       "company": "Texas Instruments",
       "enabled": true,
-      "host": "careers.ti.com",
+      "host": "edbz.fa.us2.oraclecloud.com",
       "max_results_per_term": 200,
       "search_terms": ["intern", "co-op"],
       "site": "CX",
@@ -245,6 +246,7 @@
       "enabled": true,
       "include_headings": true,
       "page_url": "https://ase.aseglobal.com/careers-us/",
+      "reader_fallback_url": "https://r.jina.ai/http://ase.aseglobal.com/careers-us/",
       "type": "static"
     },
     {
