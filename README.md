@@ -36,10 +36,11 @@ career systems:
 - Materials and gases: Entegris, Air Products, Air Liquide, Linde, FUJIFILM
   Electronic Materials, Shin-Etsu, and GlobalWafers
 
-The scanner supports Workday, Greenhouse, Lever, Ashby, Eightfold, Oracle
-Recruiting, SuccessFactors, Dayforce, iCIMS, ADP Workforce Now, ADP MyJobs,
-Cornerstone, and official server-rendered career pages. No paid search service
-or AI API is required.
+The scanner supports Workday, Greenhouse, Lever, Ashby, both current Eightfold
+career-site APIs, Oracle Recruiting, SuccessFactors, CSRF-protected Dayforce,
+iCIMS, ADP Workforce Now, ADP MyJobs, Cornerstone, and official career pages.
+For an official page that blocks GitHub's runner, its configured read-only
+reader URL is used as a fallback. No paid search service or AI API is required.
 
 ## Cost
 
