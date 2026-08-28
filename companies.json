@@ -11,37 +11,116 @@
       "enabled": true,
       "host": "amat.wd1.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "co-op", "early career"],
+      "search_terms": ["intern", "co-op"],
       "site": "External",
       "tenant": "amat",
       "type": "workday"
+    },
+    {
+      "company": "Lam Research",
+      "domain": "lamresearch.com",
+      "enabled": true,
+      "host": "lamresearch.eightfold.ai",
+      "max_pages_per_term": 30,
+      "search_terms": ["intern", "co-op"],
+      "type": "eightfold"
     },
     {
       "company": "KLA",
       "enabled": true,
       "host": "kla.wd1.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "co-op", "university"],
+      "search_terms": ["intern", "co-op"],
       "site": "Search",
       "tenant": "kla",
       "type": "workday"
+    },
+    {
+      "company": "ASML",
+      "enabled": true,
+      "host": "asml.wd3.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "ASMLEXT1",
+      "tenant": "asml",
+      "type": "workday"
+    },
+    {
+      "board_token": "asm",
+      "company": "ASM International",
+      "enabled": true,
+      "type": "greenhouse"
+    },
+    {
+      "company": "Tokyo Electron",
+      "enabled": true,
+      "host": "tel.wd3.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "TEL-Careers",
+      "tenant": "tel",
+      "type": "workday"
+    },
+    {
+      "company": "Onto Innovation",
+      "enabled": true,
+      "host": "onto.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "ONTO_Careers",
+      "tenant": "onto",
+      "type": "workday"
+    },
+    {
+      "company": "Axcelis Technologies",
+      "enabled": true,
+      "host": "axcelis.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "axcelis",
+      "tenant": "axcelis",
+      "type": "workday"
+    },
+    {
+      "company": "Veeco",
+      "enabled": true,
+      "feed_url": "https://careers.veeco.com/sitemal.xml",
+      "type": "successfactors"
+    },
+    {
+      "company": "MKS Instruments",
+      "enabled": true,
+      "host": "mksinst.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "MKSCareersAmericas",
+      "tenant": "mksinst",
+      "type": "workday"
+    },
+    {
+      "anchor_href_pattern": "/career/",
+      "company": "INFICON",
+      "enabled": true,
+      "page_url": "https://www.inficon.com/en/careers/work-at-inficon/open-positions",
+      "title_location_regex": "^(?P<title>.+?)\\s+(?P<location>United States,\\s*[A-Z]{2},\\s*.+)$",
+      "type": "static"
     },
     {
       "company": "Intel",
       "enabled": true,
       "host": "intel.wd1.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "student", "graduate engineer"],
+      "search_terms": ["intern", "co-op"],
       "site": "External",
       "tenant": "intel",
       "type": "workday"
     },
     {
-      "company": "Micron Technology",
+      "company": "Micron",
       "enabled": true,
       "host": "micron.wd1.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "co-op", "university"],
+      "search_terms": ["intern", "co-op"],
       "site": "External",
       "tenant": "micron",
       "type": "workday"
@@ -51,30 +130,197 @@
       "enabled": true,
       "host": "globalfoundries.wd1.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "co-op", "university intern"],
+      "search_terms": ["intern", "co-op"],
       "site": "External",
       "tenant": "globalfoundries",
       "type": "workday"
+    },
+    {
+      "company": "TSMC",
+      "enabled": true,
+      "feed_url": "https://ro.careers.tsmc.com/sitemal.xml",
+      "type": "successfactors"
+    },
+    {
+      "company": "Samsung Semiconductor",
+      "enabled": true,
+      "host": "sec.wd3.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "Samsung_Careers",
+      "tenant": "sec",
+      "type": "workday"
+    },
+    {
+      "company": "Texas Instruments",
+      "enabled": true,
+      "host": "careers.ti.com",
+      "max_results_per_term": 200,
+      "search_terms": ["intern", "co-op"],
+      "site": "CX",
+      "type": "oracle"
+    },
+    {
+      "company": "Wolfspeed",
+      "enabled": true,
+      "host": "cree.wd108.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "EXT",
+      "tenant": "cree",
+      "type": "workday"
+    },
+    {
+      "board": "CANDIDATEPORTAL",
+      "client": "skywater",
+      "company": "SkyWater Technology",
+      "culture": "en-US",
+      "enabled": true,
+      "host": "jobs.dayforcehcm.com",
+      "type": "dayforce"
+    },
+    {
+      "company": "onsemi",
+      "enabled": true,
+      "host": "hctz.fa.us2.oraclecloud.com",
+      "max_results_per_term": 200,
+      "search_terms": ["intern", "co-op"],
+      "site": "CX_1001",
+      "type": "oracle"
     },
     {
       "company": "Analog Devices",
       "enabled": true,
       "host": "analogdevices.wd1.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "co-op", "student"],
+      "search_terms": ["intern", "co-op"],
       "site": "External",
       "tenant": "analogdevices",
       "type": "workday"
     },
     {
-      "company": "NXP Semiconductors",
+      "company": "Infineon",
+      "domain": "infineon.com",
+      "enabled": true,
+      "host": "jobs.infineon.com",
+      "max_pages_per_term": 30,
+      "search_terms": ["intern", "co-op"],
+      "type": "eightfold"
+    },
+    {
+      "company": "STMicroelectronics",
+      "enabled": true,
+      "host": "stmicroelectronics.eightfold.ai",
+      "max_pages_per_term": 30,
+      "search_terms": ["intern", "co-op"],
+      "type": "eightfold"
+    },
+    {
+      "company": "NXP",
       "enabled": true,
       "host": "nxp.wd3.myworkdayjobs.com",
       "max_results_per_term": 80,
-      "search_terms": ["intern", "student", "graduate engineer"],
+      "search_terms": ["intern", "co-op"],
       "site": "careers",
       "tenant": "nxp",
       "type": "workday"
+    },
+    {
+      "company": "Qorvo",
+      "enabled": true,
+      "feed_url": "https://careers.qorvo.com/sitemal.xml",
+      "type": "successfactors"
+    },
+    {
+      "company": "Amkor",
+      "enabled": true,
+      "host": "career8.successfactors.com",
+      "legacy_company_id": "amkor",
+      "locale": "en_US",
+      "type": "successfactors"
+    },
+    {
+      "company": "ASE",
+      "default_location": "United States",
+      "enabled": true,
+      "include_headings": true,
+      "page_url": "https://ase.aseglobal.com/careers-us/",
+      "type": "static"
+    },
+    {
+      "company": "Teradyne",
+      "enabled": true,
+      "feed_url": "https://jobs.teradyne.com/sitemal.xml",
+      "type": "successfactors"
+    },
+    {
+      "company": "Advantest",
+      "enabled": true,
+      "max_pages": 10,
+      "slug": "advantestcareers",
+      "type": "adp_myjobs"
+    },
+    {
+      "company": "Entegris",
+      "enabled": true,
+      "host": "entegris.wd1.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "EntegrisCareers",
+      "tenant": "entegris",
+      "type": "workday"
+    },
+    {
+      "company": "Air Products",
+      "enabled": true,
+      "host": "airproducts.wd5.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "AP0001",
+      "tenant": "airproducts",
+      "type": "workday"
+    },
+    {
+      "company": "Air Liquide",
+      "enabled": true,
+      "host": "airliquidehr.wd3.myworkdayjobs.com",
+      "max_results_per_term": 80,
+      "search_terms": ["intern", "co-op"],
+      "site": "AirLiquideExternalCareer",
+      "tenant": "airliquidehr",
+      "type": "workday"
+    },
+    {
+      "company": "Linde",
+      "corp": "linde",
+      "enabled": true,
+      "host": "linde.csod.com",
+      "max_pages_per_term": 20,
+      "search_terms": ["intern", "co-op"],
+      "site_id": 23,
+      "type": "csod"
+    },
+    {
+      "company": "FUJIFILM Electronic Materials",
+      "enabled": true,
+      "host": "uscareers-fujifilm.icims.com",
+      "max_pages": 10,
+      "type": "icims"
+    },
+    {
+      "cc_id": "19000101_000001",
+      "cid": "263d7f2a-913f-4a18-85d4-7ed1ff540596",
+      "company": "Shin-Etsu",
+      "enabled": true,
+      "type": "adp_workforcenow"
+    },
+    {
+      "company": "GlobalWafers",
+      "default_location": "Sherman, TX",
+      "enabled": true,
+      "include_headings": true,
+      "page_url": "https://www.gw-gwa.com/careers",
+      "type": "static"
     }
   ]
 }
