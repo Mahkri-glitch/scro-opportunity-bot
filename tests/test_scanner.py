@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scanner import (
+    HttpRequestError,
     Job,
     RankedJob,
     Scanner,
@@ -240,23 +241,38 @@ class ScannerTests(unittest.TestCase):
 
     @patch("scanner.request_json")
     def test_eightfold_adapter_normalizes_public_positions(self, request_json_mock):
-        request_json_mock.return_value = {
-            "count": 1,
-            "positions": [
-                {
-                    "id": "EF-1",
-                    "name": "Yield Engineering Intern",
-                    "location": "Boise, ID, United States",
-                    "canonicalPositionUrl": "https://jobs.example.com/yield-intern",
-                    "t_create": 1780000000,
-                    "job_description": "Pursuing a bachelor's or master's degree.",
+        request_json_mock.side_effect = [
+            {
+                "data": {
+                    "count": 1,
+                    "positions": [
+                        {
+                            "id": "EF-1",
+                            "name": "Yield Engineering Intern",
+                            "standardizedLocations": ["Boise, ID, United States"],
+                            "positionUrl": "/careers/job/EF-1-yield-engineering-intern",
+                            "postedTs": 1780000000000,
+                        }
+                    ],
                 }
-            ],
-        }
+            },
+            {
+                "data": {
+                    "position": {
+                        "id": "EF-1",
+                        "name": "Yield Engineering Intern",
+                        "standardizedLocations": ["Boise, ID, United States"],
+                        "positionUrl": "/careers/job/EF-1-yield-engineering-intern",
+                        "jobDescription": "Pursuing a bachelor's or master's degree.",
+                    }
+                }
+            },
+        ]
         source = {
             "company": "Example Semiconductor",
             "type": "eightfold",
             "host": "example.eightfold.ai",
+            "domain": "example.com",
             "search_terms": ["intern"],
         }
 
@@ -264,6 +280,39 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].external_id, "EF-1")
+        self.assertIn("bachelor's", jobs[0].description)
+        self.assertIn("/api/pcsx/search", request_json_mock.call_args_list[0].args[1])
+        self.assertIn("/api/pcsx/position_details", request_json_mock.call_args_list[1].args[1])
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_json")
+    def test_eightfold_adapter_falls_back_to_classic_api(self, request_json_mock):
+        request_json_mock.side_effect = [
+            HttpRequestError("HTTP 403: PCSX is not enabled"),
+            {
+                "count": 1,
+                "positions": [
+                    {
+                        "id": "EF-2",
+                        "name": "Process Engineering Co-op",
+                        "location": "Hillsboro, OR, United States",
+                        "canonicalPositionUrl": "https://jobs.example.com/process-coop",
+                    }
+                ],
+            },
+        ]
+
+        jobs = Scanner().scan(
+            {
+                "company": "Example Semiconductor",
+                "type": "eightfold",
+                "host": "classic.eightfold.ai",
+                "search_terms": ["co-op"],
+            }
+        )
+
+        self.assertEqual(jobs[0].external_id, "EF-2")
+        self.assertIn("/api/apply/v2/jobs", request_json_mock.call_args_list[1].args[1])
         self.assertIsNotNone(score_job(jobs[0]))
 
     @patch("scanner.request_json")
@@ -321,18 +370,30 @@ class ScannerTests(unittest.TestCase):
         self.assertIsNotNone(score_job(jobs[0]))
 
     @patch("scanner.request_json")
-    def test_dayforce_adapter_keeps_structured_us_location(self, request_json_mock):
-        request_json_mock.return_value = {
-            "maxCount": 1,
-            "jobPostings": [
-                {
-                    "jobPostingId": "DF-1",
-                    "jobTitle": "Manufacturing Engineering Intern",
-                    "postingLocations": [{"city": "Bloomington", "state": "MN", "country": "US"}],
-                    "jobDescription": "Open to undergraduate students.",
-                }
-            ],
-        }
+    @patch("scanner.request_text_with_headers")
+    def test_dayforce_adapter_keeps_structured_us_location(self, text_mock, json_mock):
+        class Headers:
+            @staticmethod
+            def get_all(_name):
+                return ["__Host-next-auth.csrf-token=cookie-value; Path=/; Secure"]
+
+        text_mock.return_value = ('{"csrfToken":"csrf-value"}', Headers())
+        json_mock.side_effect = [
+            {"jobBoardCode": "CANDIDATEPORTAL"},
+            {
+                "maxCount": 1,
+                "jobPostings": [
+                    {
+                        "jobPostingId": "DF-1",
+                        "jobTitle": "Manufacturing Engineering Intern",
+                        "postingLocations": [
+                            {"city": "Bloomington", "state": "MN", "country": "US"}
+                        ],
+                        "jobDescription": "Open to undergraduate students.",
+                    }
+                ],
+            },
+        ]
 
         jobs = Scanner().scan(
             {
@@ -346,6 +407,11 @@ class ScannerTests(unittest.TestCase):
 
         self.assertIn("Bloomington", jobs[0].location)
         self.assertIsNotNone(score_job(jobs[0]))
+        post_headers = json_mock.call_args_list[1].kwargs["headers"]
+        self.assertEqual(post_headers["X-CSRF-TOKEN"], "csrf-value")
+        self.assertEqual(
+            post_headers["Cookie"], "__Host-next-auth.csrf-token=cookie-value"
+        )
 
     @patch("scanner.request_text")
     def test_static_adapter_splits_inficon_style_title_and_location(self, request_text_mock):
@@ -367,6 +433,60 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(jobs[0].title, "Process Engineering Intern")
         self.assertEqual(jobs[0].location, "United States, NY, East Syracuse")
+        self.assertIsNotNone(score_job(jobs[0]))
+
+    @patch("scanner.request_text")
+    def test_static_adapter_uses_reader_fallback_for_blocked_page(self, request_text_mock):
+        request_text_mock.side_effect = [
+            HttpRequestError("HTTP 403 from official page"),
+            """Title: Careers
+URL Source: https://ase.aseglobal.com/careers-us/
+Markdown Content:
+## Packaging Engineering Intern
+
+## Senior Finance Manager
+""",
+        ]
+
+        jobs = Scanner().scan(
+            {
+                "company": "ASE",
+                "type": "static",
+                "page_url": "https://ase.aseglobal.com/careers-us/",
+                "reader_fallback_url": "https://r.jina.ai/http://ase.aseglobal.com/careers-us/",
+                "default_location": "United States",
+                "include_headings": True,
+            }
+        )
+
+        packaging = next(job for job in jobs if job.title == "Packaging Engineering Intern")
+        self.assertEqual(packaging.url, "https://ase.aseglobal.com/careers-us/")
+        self.assertIsNotNone(score_job(packaging))
+
+    @patch("scanner.request_text")
+    def test_static_reader_pairs_inficon_link_with_following_location(self, request_text_mock):
+        request_text_mock.side_effect = [
+            "",
+            """[Process Engineering Co-Op/Intern](/en/career/process-co-op-intern)
+United States, NY, Syracuse
+""",
+        ]
+
+        jobs = Scanner().scan(
+            {
+                "company": "INFICON",
+                "type": "static",
+                "page_url": "https://www.inficon.com/en/careers/open-positions",
+                "reader_fallback_url": "https://r.jina.ai/http://www.inficon.com/en/careers/open-positions",
+                "anchor_href_pattern": "/career/",
+                "title_location_regex": (
+                    r"^(?P<title>.+?)\s+(?P<location>United States,\s*[A-Z]{2},\s*.+)$"
+                ),
+            }
+        )
+
+        self.assertEqual(jobs[0].title, "Process Engineering Co-Op/Intern")
+        self.assertEqual(jobs[0].location, "United States, NY, Syracuse")
         self.assertIsNotNone(score_job(jobs[0]))
 
     @patch("scanner.request_json")
