@@ -83,7 +83,7 @@ are posted to Discord, and all current matching job IDs are recorded in
 `seen_jobs.json`. Subsequent runs only post opportunities that have not already
 been seen.
 
-The scheduled workflow runs daily at **9:00 AM America/New_York**.
+The scheduled workflow runs daily at **9:17 AM America/New_York**. The off-hour minute reduces GitHub Actions scheduling delays.
 
 ## Add another employer
 
