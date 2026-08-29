@@ -2,7 +2,7 @@ name: Daily semiconductor opportunity scan
 
 on:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "17 9 * * *"
       timezone: "America/New_York"
   workflow_dispatch:
     inputs:
