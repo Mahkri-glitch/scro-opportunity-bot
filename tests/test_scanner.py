@@ -13,6 +13,7 @@ from scanner import (
     is_us_based,
     looks_non_us,
     matches_target_role,
+    post_scan_summary,
     rank_jobs,
     score_job,
 )
@@ -570,6 +571,21 @@ United States, NY, Syracuse
             canonical_url("https://Example.com/jobs/123/?source=campus"),
             "https://example.com/jobs/123",
         )
+
+    @patch("scanner.request_json")
+    def test_empty_scan_summary_reports_coverage(self, request_json_mock):
+        post_scan_summary(
+            "https://discord.com/api/webhooks/123/token",
+            successful_sources=36,
+            configured_sources=36,
+            matching_jobs=12,
+        )
+
+        payload = request_json_mock.call_args.kwargs["payload"]
+        self.assertEqual(payload["username"], "Jensen Huang")
+        self.assertIn("36/36", payload["content"])
+        self.assertIn("12", payload["content"])
+        self.assertIn("No new opportunities today", payload["content"])
 
     def test_rank_jobs_returns_ranked_jobs_not_filter_booleans(self):
         jobs = [
