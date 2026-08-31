@@ -1872,6 +1872,30 @@ def post_discord(webhook: str, ranked_jobs: list[RankedJob]) -> None:
         time.sleep(0.8)
 
 
+def post_scan_summary(
+    webhook: str,
+    *,
+    successful_sources: int,
+    configured_sources: int,
+    matching_jobs: int,
+) -> None:
+    """Confirm that a scan ran when there were no new alerts to display."""
+    validate_webhook(webhook)
+    icon = "✅" if successful_sources == configured_sources else "⚠️"
+    payload = {
+        "username": DISCORD_BOT_NAME,
+        "content": (
+            f"{icon} **Daily semiconductor scan complete — "
+            f"{datetime.now().strftime('%B %d, %Y')}**\n"
+            f"Checked **{successful_sources}/{configured_sources}** company feeds and found "
+            f"**{matching_jobs}** active targeted U.S. opportunities.\n"
+            "**No new opportunities today.** I’ll keep looking tomorrow."
+        ),
+        "allowed_mentions": {"parse": []},
+    }
+    request_json("POST", webhook, payload=payload, params={"wait": "true"}, timeout=25)
+
+
 def post_test(webhook: str) -> None:
     validate_webhook(webhook)
     payload = {
@@ -1891,6 +1915,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--dry-run", action="store_true", help="Print matches without posting or changing state")
     parser.add_argument("--send-test", action="store_true", help="Send one Discord connectivity message")
+    parser.add_argument(
+        "--post-summary",
+        action="store_true",
+        help="Post a completion message when a live scan has no new opportunities",
+    )
     return parser.parse_args()
 
 
@@ -1916,6 +1945,9 @@ def main() -> int:
     scanner = Scanner(timeout=int(settings.get("request_timeout_seconds", 25)))
     all_jobs: dict[str, Job] = {}
     successful_sources = 0
+    configured_sources = sum(
+        1 for source in config.get("sources", []) if source.get("enabled", True)
+    )
 
     for source in config.get("sources", []):
         if not source.get("enabled", True):
@@ -1955,6 +1987,16 @@ def main() -> int:
             logging.error("DISCORD_WEBHOOK_URL is missing")
             return 2
         post_discord(webhook, alerts)
+    elif args.post_summary:
+        if not webhook:
+            logging.error("DISCORD_WEBHOOK_URL is missing")
+            return 2
+        post_scan_summary(
+            webhook,
+            successful_sources=successful_sources,
+            configured_sources=configured_sources,
+            matching_jobs=len(ranked),
+        )
 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     # Mark every current match as seen. This prevents a first run with many jobs
