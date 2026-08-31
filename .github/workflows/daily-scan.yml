@@ -2,8 +2,9 @@ name: Daily semiconductor opportunity scan
 
 on:
   schedule:
-    - cron: "17 9 * * *"
-      timezone: "America/New_York"
+    # GitHub's timezone-aware scheduler produced a four-hour offset for this
+    # repository, so use explicit UTC for 9:17 AM EDT.
+    - cron: "17 13 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -73,7 +74,7 @@ jobs:
         if: steps.mode.outputs.value == 'scan-and-post'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python scanner.py
+        run: python scanner.py --post-summary
 
       - name: Persist duplicate-suppression state
         if: steps.mode.outputs.value == 'scan-and-post'
