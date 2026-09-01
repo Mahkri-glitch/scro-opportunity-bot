@@ -32,7 +32,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -68,12 +68,15 @@ jobs:
 
       - name: Preview matches without posting
         if: steps.mode.outputs.value == 'dry-run'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scanner.py --dry-run
 
       - name: Scan and post new matches
         if: steps.mode.outputs.value == 'scan-and-post'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scanner.py --post-summary
 
       - name: Persist duplicate-suppression state
