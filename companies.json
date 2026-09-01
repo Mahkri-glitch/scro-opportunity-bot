@@ -1,5 +1,14 @@
 {
   "settings": {
+    "ai": {
+      "companies_per_query": 6,
+      "discovery_enabled": true,
+      "discovery_model": "gemini-3-flash-preview",
+      "enabled": true,
+      "minimum_confidence": 72,
+      "model": "gemini-2.5-flash",
+      "review_batch_size": 12
+    },
     "max_alerts_per_run": 20,
     "request_timeout_seconds": 25,
     "seen_retention_days": 365,
