@@ -9,12 +9,17 @@ from scanner import (
     RankedJob,
     Scanner,
     canonical_url,
+    discover_jobs_with_gemini,
+    extract_gemini_text,
+    extract_interaction_text,
+    gemini_json,
     has_explicit_us_location,
     is_us_based,
     looks_non_us,
     matches_target_role,
     post_scan_summary,
     rank_jobs,
+    review_jobs_with_gemini,
     score_job,
 )
 
@@ -610,6 +615,139 @@ United States, NY, Syracuse
         self.assertEqual(len(ranked), 1)
         self.assertIsInstance(ranked[0], RankedJob)
         self.assertEqual(ranked[0].job.title, "Yield Engineering Intern")
+
+    def test_extract_gemini_text_accepts_fenced_json(self):
+        response = {
+            "candidates": [
+                {"content": {"parts": [{"text": "```json\n{\"jobs\": []}\n```"}]}}
+            ]
+        }
+        self.assertEqual(extract_gemini_text(response), '{"jobs": []}')
+
+    def test_extract_interaction_text_reads_model_output_step(self):
+        response = {
+            "status": "completed",
+            "steps": [
+                {"type": "google_search_call", "arguments": {"queries": ["test"]}},
+                {
+                    "type": "model_output",
+                    "content": [{"type": "text", "text": '{"jobs": []}'}],
+                },
+            ],
+        }
+        self.assertEqual(extract_interaction_text(response), '{"jobs": []}')
+
+    @patch("scanner.request_json")
+    def test_grounded_gemini_call_uses_interactions_tools(self, request_json_mock):
+        request_json_mock.return_value = {
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [{"type": "text", "text": '{"jobs": []}'}],
+                }
+            ]
+        }
+        schema = {"type": "object", "properties": {"jobs": {"type": "array"}}}
+
+        result = gemini_json(
+            "secret-key", "gemini-3-flash-preview", "find jobs", schema, use_search=True
+        )
+
+        self.assertEqual(result, {"jobs": []})
+        self.assertTrue(request_json_mock.call_args.args[1].endswith("/interactions"))
+        payload = request_json_mock.call_args.kwargs["payload"]
+        self.assertEqual(
+            payload["tools"],
+            [{"type": "google_search"}, {"type": "url_context"}],
+        )
+        self.assertEqual(
+            request_json_mock.call_args.kwargs["headers"]["x-goog-api-key"], "secret-key"
+        )
+
+    @patch("scanner.gemini_json")
+    def test_ai_review_rescues_generic_title_from_relevant_duties(self, gemini_mock):
+        gemini_mock.return_value = {
+            "decisions": [
+                {
+                    "index": 0,
+                    "accept": True,
+                    "confidence": 94,
+                    "us_based": True,
+                    "internship_or_coop": True,
+                    "categories": ["Process", "Deposition", "Equipment"],
+                    "degrees": ["Bachelor's", "Master's"],
+                    "reason": "Supports thin-film process development in a semiconductor fab.",
+                    "evidence": "Duties include deposition experiments and equipment monitoring.",
+                }
+            ]
+        }
+        job = Job(
+            company="Example Semiconductor",
+            title="Engineering Intern",
+            location="Phoenix, AZ",
+            url="https://example.com/jobs/engineering-intern",
+            source="Test",
+            description=(
+                "Develop ALD deposition processes, monitor vacuum equipment, and analyze wafer "
+                "uniformity. Open to bachelor's and master's students."
+            ),
+        )
+
+        ranked = review_jobs_with_gemini([job], api_key="test-key")
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0].job.title, "Engineering Intern")
+        self.assertIn("Deposition", ranked[0].tags)
+        self.assertIn("Bachelor's", ranked[0].tags)
+        self.assertIn("thin-film", ranked[0].ai_reason)
+
+    @patch("scanner.gemini_json")
+    def test_grounded_discovery_rejects_non_us_and_unofficial_urls(self, gemini_mock):
+        gemini_mock.return_value = {
+            "jobs": [
+                {
+                    "company": "Example Semiconductor",
+                    "title": "Process Engineering Intern",
+                    "location": "Austin, TX",
+                    "url": "https://example.wd1.myworkdayjobs.com/job/process-intern",
+                    "posted": "2026-08-30",
+                    "description": "Supports wafer process development.",
+                    "evidence": "The live posting describes fab process work.",
+                    "verified_live": True,
+                },
+                {
+                    "company": "Example Semiconductor",
+                    "title": "Yield Engineering Intern",
+                    "location": "Singapore",
+                    "url": "https://example.wd1.myworkdayjobs.com/job/yield-intern",
+                    "posted": "",
+                    "description": "Yield analysis.",
+                    "evidence": "Located in Singapore.",
+                    "verified_live": True,
+                },
+                {
+                    "company": "Example Semiconductor",
+                    "title": "Equipment Engineering Intern",
+                    "location": "Austin, TX",
+                    "url": "https://jobs-aggregator.example/equipment-intern",
+                    "posted": "",
+                    "description": "Equipment work.",
+                    "evidence": "Not an official URL.",
+                    "verified_live": True,
+                },
+            ]
+        }
+        source = {
+            "company": "Example Semiconductor",
+            "type": "workday",
+            "host": "example.wd1.myworkdayjobs.com",
+        }
+
+        jobs = discover_jobs_with_gemini([source], api_key="test-key")
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Process Engineering Intern")
+        self.assertEqual(jobs[0].source, "Gemini grounded search")
 
 
 if __name__ == "__main__":
