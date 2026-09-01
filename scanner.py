@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Free semiconductor opportunity scanner for SCRO at UCF.
+"""AI-assisted semiconductor opportunity scanner for SCRO at UCF.
 
-The scanner reads public applicant-tracking-system feeds, keeps only targeted
-semiconductor internships/co-ops, suppresses duplicates, and sends new matches
-to a Discord incoming webhook.
+The scanner combines public applicant-tracking-system feeds with Gemini's
+grounded Google Search, uses a separate Gemini review pass to verify relevance,
+suppresses duplicates, and sends new matches to a Discord incoming webhook.
 """
 
 from __future__ import annotations
@@ -33,6 +33,10 @@ DEFAULT_CONFIG = ROOT / "companies.json"
 DEFAULT_STATE = ROOT / "seen_jobs.json"
 USER_AGENT = "SCRO-Opportunity-Bot/1.0 (+https://github.com/Mahkri-glitch/scro-opportunity-bot)"
 DISCORD_BOT_NAME = "Jensen Huang"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_DISCOVERY_MODEL = "gemini-3-flash-preview"
+GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
 INTERNSHIP_PATTERNS = (
     r"\bintern(ship)?\b",
@@ -311,10 +315,105 @@ class RankedJob:
     job: Job
     score: int
     tags: tuple[str, ...]
+    ai_reason: str = ""
+    ai_evidence: str = ""
 
 
 class HttpRequestError(RuntimeError):
     """Raised when a remote job feed or Discord request fails."""
+
+
+def extract_gemini_text(response: Any) -> str:
+    """Extract the first text response from Gemini's generateContent payload."""
+    if not isinstance(response, dict):
+        raise ValueError("Gemini returned a non-object response")
+    candidates = response.get("candidates") or []
+    if not candidates:
+        feedback = response.get("promptFeedback") or {}
+        raise ValueError(f"Gemini returned no candidates: {feedback}")
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
+    if not text:
+        raise ValueError("Gemini returned no text")
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
+def extract_interaction_text(response: Any) -> str:
+    """Extract model text from a Gemini Interactions API response."""
+    if not isinstance(response, dict):
+        raise ValueError("Gemini returned a non-object interaction")
+    interaction = response.get("interaction", response)
+    if not isinstance(interaction, dict):
+        raise ValueError("Gemini returned an invalid interaction")
+    if interaction.get("output_text"):
+        return str(interaction["output_text"]).strip()
+    chunks: list[str] = []
+    for step in interaction.get("steps", []):
+        if not isinstance(step, dict) or step.get("type") != "model_output":
+            continue
+        for block in step.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                chunks.append(str(block["text"]))
+    text = "".join(chunks).strip()
+    if not text:
+        raise ValueError(f"Gemini interaction returned no model text (status={interaction.get('status')})")
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
+def gemini_json(
+    api_key: str,
+    model: str,
+    prompt: str,
+    schema: dict[str, Any],
+    *,
+    use_search: bool = False,
+    timeout: int = 90,
+) -> dict[str, Any]:
+    """Call Gemini with a JSON schema and optionally grounded web tools."""
+    if use_search:
+        response = request_json(
+            "POST",
+            GEMINI_INTERACTIONS_URL,
+            payload={
+                "model": model,
+                "input": prompt,
+                "tools": [{"type": "google_search"}, {"type": "url_context"}],
+                "response_format": {
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": schema,
+                },
+            },
+            headers={"x-goog-api-key": api_key},
+            timeout=timeout,
+        )
+        parsed = json.loads(extract_interaction_text(response))
+        if not isinstance(parsed, dict):
+            raise ValueError("Gemini JSON response was not an object")
+        return parsed
+
+    payload: dict[str, Any] = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": schema,
+        },
+    }
+    response = request_json(
+        "POST",
+        f"{GEMINI_API_ROOT}/{model}:generateContent",
+        payload=payload,
+        headers={"x-goog-api-key": api_key},
+        timeout=timeout,
+    )
+    parsed = json.loads(extract_gemini_text(response))
+    if not isinstance(parsed, dict):
+        raise ValueError("Gemini JSON response was not an object")
+    return parsed
 
 
 def request_json(
@@ -555,6 +654,280 @@ def rank_jobs(jobs: Iterable[Job], us_only: bool = True) -> list[RankedJob]:
     return ranked
 
 
+AI_ROLE_CATEGORIES = (
+    "Process", "Yield", "Manufacturing", "Product", "Equipment", "Metrology",
+    "Integration", "Lithography", "Etch", "Deposition", "CVD", "PVD", "ALD",
+    "CMP", "Packaging", "Test", "Reliability", "Semiconductor",
+)
+
+
+def eligible_for_ai_review(job: Job, us_only: bool = True) -> bool:
+    """Apply only objective gates before asking AI to assess technical relevance."""
+    title = clean_text(job.title)
+    title_lower = title.casefold()
+    if not matches_any(title, INTERNSHIP_PATTERNS):
+        return False
+    if any(term in title_lower for term in EXCLUDED_FUNCTION_TERMS):
+        return False
+    if matches_any(title, SENIOR_PATTERNS) and "intern" not in title_lower:
+        return False
+    if matches_any(title, DOCTORAL_TITLE_PATTERNS) and not (
+        matches_any(title, BACHELOR_PATTERNS) or matches_any(title, MASTER_PATTERNS)
+    ):
+        return False
+    return not us_only or is_us_based(title, job.location)
+
+
+def review_jobs_with_gemini(
+    jobs: Iterable[Job],
+    *,
+    api_key: str,
+    model: str = DEFAULT_GEMINI_MODEL,
+    minimum_confidence: int = 72,
+    batch_size: int = 12,
+) -> list[RankedJob]:
+    """Use Gemini as a semantic verifier and ranker for collected openings."""
+    candidates = [job for job in jobs if eligible_for_ai_review(job, us_only=True)]
+    schema = {
+        "type": "object",
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "accept": {"type": "boolean"},
+                        "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+                        "us_based": {"type": "boolean"},
+                        "internship_or_coop": {"type": "boolean"},
+                        "categories": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": list(AI_ROLE_CATEGORIES)},
+                        },
+                        "degrees": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["Bachelor's", "Master's", "Unspecified"]},
+                        },
+                        "reason": {"type": "string"},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": [
+                        "index", "accept", "confidence", "us_based", "internship_or_coop",
+                        "categories", "degrees", "reason", "evidence",
+                    ],
+                },
+            }
+        },
+        "required": ["decisions"],
+    }
+    ranked: list[RankedJob] = []
+    for offset in range(0, len(candidates), max(1, batch_size)):
+        batch = candidates[offset : offset + max(1, batch_size)]
+        records = [
+            {
+                "index": index,
+                "company": job.company,
+                "title": job.title,
+                "location": job.location,
+                "description": clean_text(job.description)[:7000],
+            }
+            for index, job in enumerate(batch)
+        ]
+        prompt = (
+            "You are the independent screening agent for a U.S. semiconductor-manufacturing "
+            "student organization. Review every supplied opening. Accept only an internship or "
+            "co-op that is explicitly U.S.-based and substantially involves at least one of: "
+            "semiconductor process engineering, yield, manufacturing, product engineering, fab "
+            "equipment, metrology, process integration, lithography, etch, thin-film deposition, "
+            "CVD, PVD, ALD, CMP, semiconductor packaging, semiconductor test, or reliability. "
+            "Judge the actual duties, not just keyword presence. Reject software-only, business, "
+            "finance, marketing, sales, supply-chain-only, generic circuit-design, and unrelated "
+            "laboratory roles. A generic title such as 'Engineering Intern' may be accepted when "
+            "its description clearly establishes relevant manufacturing work. Bachelor's and "
+            "master's eligibility are preferences, not mandatory gates. Set confidence to your "
+            "0-100 relevance confidence. Give a concise paraphrased reason and concise supporting "
+            "evidence from the supplied record. Do not invent missing facts. Return one decision "
+            "for every index.\n\nOPENINGS:\n" + json.dumps(records, ensure_ascii=False)
+        )
+        response = gemini_json(api_key, model, prompt, schema)
+        decisions = response.get("decisions") or []
+        decision_by_index = {
+            item.get("index"): item for item in decisions if isinstance(item, dict)
+        }
+        for index, job in enumerate(batch):
+            decision = decision_by_index.get(index)
+            if not decision:
+                continue
+            confidence = max(0, min(100, int(decision.get("confidence", 0) or 0)))
+            if not (
+                decision.get("accept")
+                and decision.get("us_based")
+                and decision.get("internship_or_coop")
+                and confidence >= minimum_confidence
+            ):
+                continue
+            categories = [
+                value for value in decision.get("categories", []) if value in AI_ROLE_CATEGORIES
+            ]
+            degrees = [
+                value for value in decision.get("degrees", [])
+                if value in {"Bachelor's", "Master's"}
+            ]
+            tags = [opportunity_type(job.title), *categories, *degrees]
+            if any(term in job.location.casefold() for term in FLORIDA_TERMS):
+                tags.append("Florida")
+            tags = list(dict.fromkeys(tags))
+            preference_boost = 4 * len(degrees) + (3 if "Florida" in tags else 0)
+            ranked.append(
+                RankedJob(
+                    job=job,
+                    score=confidence + preference_boost,
+                    tags=tuple(tags[:6]),
+                    ai_reason=clean_text(decision.get("reason"))[:300],
+                    ai_evidence=clean_text(decision.get("evidence"))[:300],
+                )
+            )
+    ranked.sort(key=lambda item: (-item.score, item.job.company.casefold(), item.job.title.casefold()))
+    return ranked
+
+
+def source_hosts(source: dict[str, Any]) -> set[str]:
+    """Return configured official/ATS hosts accepted for grounded discoveries."""
+    hosts: set[str] = set()
+    for key in ("host", "domain", "feed_url", "page_url"):
+        value = clean_text(source.get(key))
+        if not value:
+            continue
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        if parsed.hostname:
+            hosts.add(parsed.hostname.casefold().removeprefix("www."))
+    if source.get("type") == "greenhouse":
+        hosts.update({"boards.greenhouse.io", "job-boards.greenhouse.io"})
+    elif source.get("type") == "adp_myjobs":
+        hosts.add("myjobs.adp.com")
+    elif source.get("type") == "adp_workforcenow":
+        hosts.add("workforcenow.adp.com")
+    return hosts
+
+
+def url_matches_source(url: str, source: dict[str, Any]) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    candidate = parsed.hostname.casefold().removeprefix("www.")
+    return any(candidate == host or candidate.endswith(f".{host}") for host in source_hosts(source))
+
+
+def discover_jobs_with_gemini(
+    sources: Iterable[dict[str, Any]],
+    *,
+    api_key: str,
+    model: str = DEFAULT_GEMINI_DISCOVERY_MODEL,
+    companies_per_query: int = 6,
+) -> list[Job]:
+    """Find additional live roles using grounded Search plus URL Context."""
+    enabled = [source for source in sources if source.get("enabled", True)]
+    source_by_company = {source["company"].casefold(): source for source in enabled}
+    schema = {
+        "type": "object",
+        "properties": {
+            "jobs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "company": {"type": "string"},
+                        "title": {"type": "string"},
+                        "location": {"type": "string"},
+                        "url": {"type": "string"},
+                        "posted": {"type": "string"},
+                        "description": {"type": "string"},
+                        "evidence": {"type": "string"},
+                        "verified_live": {"type": "boolean"},
+                    },
+                    "required": [
+                        "company", "title", "location", "url", "posted", "description",
+                        "evidence", "verified_live",
+                    ],
+                },
+            }
+        },
+        "required": ["jobs"],
+    }
+    found: dict[str, Job] = {}
+    chunk_size = max(1, companies_per_query)
+    for offset in range(0, len(enabled), chunk_size):
+        group = enabled[offset : offset + chunk_size]
+        targets = [
+            {
+                "company": source["company"],
+                "allowed_hosts": sorted(source_hosts(source)),
+            }
+            for source in group
+        ]
+        prompt = (
+            "Act as a job-discovery agent. Use Google Search and URL Context to find currently "
+            "live U.S.-based internships and co-ops for the listed semiconductor companies. "
+            "Prioritize process, yield, manufacturing, product engineering, equipment, metrology, "
+            "integration, lithography, etch, deposition, CVD, PVD, ALD, CMP, packaging, test, "
+            "reliability, and other genuinely semiconductor-manufacturing duties. Search beyond "
+            "exact title keywords. Return only individual official company/ATS job pages whose "
+            "current page you verified with URL Context. Do not return aggregators, search-result "
+            "pages, expired listings, general career pages, non-U.S. roles, full-time roles, or "
+            "invented URLs. The URL host must be one of the allowed hosts for that company. "
+            "Description and evidence must be concise paraphrases of the live page. If no verified "
+            "role exists, return none for that company.\n\nTARGETS:\n" + json.dumps(targets)
+        )
+        response = gemini_json(api_key, model, prompt, schema, use_search=True, timeout=120)
+        for item in response.get("jobs", []):
+            if not isinstance(item, dict) or not item.get("verified_live"):
+                continue
+            source = source_by_company.get(clean_text(item.get("company")).casefold())
+            if not source:
+                continue
+            title = clean_text(item.get("title"))
+            location = clean_text(item.get("location"))
+            url = clean_text(item.get("url"))
+            if not matches_any(title, INTERNSHIP_PATTERNS):
+                continue
+            if not is_us_based(title, location) or not url_matches_source(url, source):
+                continue
+            job = Job(
+                company=source["company"],
+                title=title,
+                location=location,
+                url=url,
+                source="Gemini grounded search",
+                posted=clean_text(item.get("posted")),
+                description=" ".join(
+                    filter(None, [clean_text(item.get("description")), clean_text(item.get("evidence"))])
+                ),
+            )
+            found[job.stable_id] = job
+    return list(found.values())
+
+
+def deduplicate_jobs(jobs: Iterable[Job]) -> list[Job]:
+    """Merge ATS and grounded-search copies while preferring richer ATS records."""
+    selected: dict[tuple[str, str, str], Job] = {}
+    for job in jobs:
+        key = (
+            job.company.casefold(),
+            clean_text(job.title).casefold(),
+            clean_text(job.location).casefold(),
+        )
+        current = selected.get(key)
+        if current is None:
+            selected[key] = job
+            continue
+        current_quality = (current.source != "Gemini grounded search", len(current.description))
+        job_quality = (job.source != "Gemini grounded search", len(job.description))
+        if job_quality > current_quality:
+            selected[key] = job
+    return list(selected.values())
+
+
 def opportunity_type(title: str) -> str:
     lowered = title.casefold()
     if "co-op" in lowered or "coop" in lowered or "co op" in lowered:
@@ -751,12 +1124,10 @@ class Scanner:
                 job
                 for job in jobs.values()
                 if matches_any(job.title, INTERNSHIP_PATTERNS)
-                and matches_target_role(job.title)
                 and not has_non_us_marker(f"{job.title} {job.location}")
             ]
             candidates.sort(
-                key=lambda job: (score_job(job, us_only=False) or RankedJob(job, 0, ())).score,
-                reverse=True,
+                key=lambda job: (job.company.casefold(), job.title.casefold()),
             )
             detail_limit = int(source.get("max_detail_requests", 50))
             for job in candidates[:detail_limit]:
@@ -1078,12 +1449,10 @@ class Scanner:
                 job
                 for job in jobs.values()
                 if matches_any(job.title, INTERNSHIP_PATTERNS)
-                and matches_target_role(job.title)
                 and not has_non_us_marker(f"{job.title} {job.location}")
             ]
             candidates.sort(
-                key=lambda job: (score_job(job, us_only=False) or RankedJob(job, 0, ())).score,
-                reverse=True,
+                key=lambda job: (job.company.casefold(), job.title.casefold()),
             )
             for job in candidates[: int(source.get("max_detail_requests", 50))]:
                 position_id = position_ids.get(job.stable_id, "")
@@ -1832,14 +2201,18 @@ def discord_embeds(jobs: list[RankedJob]) -> list[dict[str, Any]]:
         ]
         if job.posted:
             fields.append({"name": "Posted", "value": job.posted[:100], "inline": True})
-        fields.append({"name": "Priority score", "value": str(ranked.score), "inline": True})
+        fields.append({"name": "AI match score", "value": f"{min(ranked.score, 100)}/100", "inline": True})
+        if ranked.ai_reason:
+            fields.append({"name": "Why it matches", "value": ranked.ai_reason[:1024], "inline": False})
+        if ranked.ai_evidence:
+            fields.append({"name": "Evidence checked", "value": ranked.ai_evidence[:1024], "inline": False})
         embeds.append(
             {
                 "title": job.title[:256],
                 "url": job.url,
                 "color": 0x4F46E5,
                 "fields": fields,
-                "footer": {"text": f"Source: {job.source} · Verify requirements on the official posting"},
+                "footer": {"text": f"Source: {job.source} · AI-screened; verify details before applying"},
             }
         )
     return embeds
@@ -1938,6 +2311,14 @@ def main() -> int:
 
     config = load_json(args.config, {})
     settings = config.get("settings", {})
+    ai_settings = settings.get("ai", {})
+    ai_enabled = bool(ai_settings.get("enabled", True))
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if ai_enabled and not gemini_key:
+        logging.error(
+            "GEMINI_API_KEY is missing; refusing to silently fall back to the old keyword-only scan"
+        )
+        return 2
     seen = prune_seen(
         load_json(args.state, {}),
         int(settings.get("seen_retention_days", 365)),
@@ -1966,7 +2347,37 @@ def main() -> int:
         logging.error("Every configured job source failed; state was not changed")
         return 1
 
-    ranked = rank_jobs(all_jobs.values(), us_only=bool(settings.get("us_only", True)))
+    if ai_enabled and ai_settings.get("discovery_enabled", True):
+        try:
+            discovered = discover_jobs_with_gemini(
+                config.get("sources", []),
+                api_key=gemini_key,
+                model=os.getenv(
+                    "GEMINI_DISCOVERY_MODEL",
+                    clean_text(ai_settings.get("discovery_model")) or DEFAULT_GEMINI_DISCOVERY_MODEL,
+                ),
+                companies_per_query=int(ai_settings.get("companies_per_query", 6)),
+            )
+            logging.info("Gemini discovery agent found %d additional candidates", len(discovered))
+            for job in discovered:
+                all_jobs[job.stable_id] = job
+        except (HttpRequestError, ValueError, json.JSONDecodeError) as exc:
+            logging.warning("Gemini discovery agent failed; continuing with ATS candidates: %s", exc)
+
+    unique_jobs = deduplicate_jobs(all_jobs.values())
+    if ai_enabled:
+        ranked = review_jobs_with_gemini(
+            unique_jobs,
+            api_key=gemini_key,
+            model=os.getenv(
+                "GEMINI_MODEL",
+                clean_text(ai_settings.get("model")) or DEFAULT_GEMINI_MODEL,
+            ),
+            minimum_confidence=int(ai_settings.get("minimum_confidence", 72)),
+            batch_size=int(ai_settings.get("review_batch_size", 12)),
+        )
+    else:
+        ranked = rank_jobs(unique_jobs, us_only=bool(settings.get("us_only", True)))
     new_ranked = [item for item in ranked if item.job.stable_id not in seen]
     limit = int(settings.get("max_alerts_per_run", 20))
     alerts = new_ranked[:limit]
