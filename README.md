@@ -1,18 +1,24 @@
 # SCRO Opportunity Bot
 
-A free Discord alert system for the Semiconductor Career Readiness Organization
-at UCF. It scans public employer job feeds every day and keeps only targeted
-semiconductor internships and co-ops.
+An AI-assisted Discord alert system for the Semiconductor Career Readiness
+Organization at UCF. Jensen Huang combines official employer job feeds with
+Gemini grounded search, independently reviews the full duties of each opening,
+and posts high-confidence semiconductor internships and co-ops every day.
 
-## What it allows
+## How opportunities are found and checked
 
-- The title must say **intern/internship** or **co-op**
-- The title must also contain at least one target area: process, yield,
-  manufacturing, product engineering, equipment, metrology, integration,
-  lithography, etch, deposition, CVD, PVD, ALD, CMP, packaging, test,
-  reliability, or semiconductor
-- Generic internships are rejected even when their descriptions contain
-  semiconductor or manufacturing boilerplate
+- Official ATS collectors scan all 36 configured employers.
+- A separate Gemini discovery agent uses grounded Google Search and URL Context
+  to locate relevant live openings that an employer feed may have missed.
+- The discovery agent may only return verified individual job pages on the
+  configured official company or ATS host; aggregator and invented URLs are
+  discarded in code.
+- The review agent reads the full available description, so a generic title
+  such as **Engineering Intern** can qualify when its actual duties clearly
+  involve process, yield, manufacturing, product engineering, equipment,
+  metrology, integration, lithography, etch, deposition, CVD, PVD, ALD, CMP,
+  packaging, test, reliability, or semiconductor fabrication.
+- The title must still identify an **internship** or **co-op**.
 - Product-management roles are rejected; “product” qualifies only in an
   engineering, development, quality, reliability, or test context
 - Roles explicitly open to bachelor's and master's students receive an
@@ -36,29 +42,36 @@ career systems:
 - Materials and gases: Entegris, Air Products, Air Liquide, Linde, FUJIFILM
   Electronic Materials, Shin-Etsu, and GlobalWafers
 
-The scanner supports Workday, Greenhouse, Lever, Ashby, both current Eightfold
+The ATS layer supports Workday, Greenhouse, Lever, Ashby, both current Eightfold
 career-site APIs, Oracle Recruiting, SuccessFactors, CSRF-protected Dayforce,
 iCIMS, ADP Workforce Now, ADP MyJobs, Cornerstone, and official career pages.
 For an official page that blocks GitHub's runner, its configured read-only
-reader URL is used as a fallback. No paid search service or AI API is required.
+reader URL is used as a fallback.
 
 ## Cost
 
-This version does not call OpenAI or any other paid AI/search API. The Discord
-webhook is free, and standard GitHub-hosted Actions runners are free for public
-repositories.
+This version does not call OpenAI. It uses the Gemini API; selected Gemini
+models currently have a limited free tier. The Discord webhook is free, and
+standard GitHub-hosted Actions runners are free for public repositories. Google
+may change model availability or free-tier quotas, so check its current pricing
+before relying on it indefinitely.
 
 ## Repository secret
 
-The workflow requires one Actions secret:
+The workflow requires two Actions secrets:
 
 | Secret | Purpose |
 |---|---|
 | `DISCORD_WEBHOOK_URL` | Posts alerts to the private SCRO Discord channel |
+| `GEMINI_API_KEY` | Runs grounded discovery and semantic job review |
 
-Never place the webhook URL in a repository file, issue, log, or chat message.
-The previously created `OPENAI_API_KEY` secret is not used by this version and
-may be deleted.
+Never place either secret in a repository file, issue, log, or chat message.
+An `OPENAI_API_KEY` secret is not used by this version and may be deleted.
+
+Create a Gemini key in Google AI Studio, then open **Settings → Secrets and
+variables → Actions → New repository secret** and name it exactly
+`GEMINI_API_KEY`. If the key is missing, the workflow fails visibly instead of
+silently reverting to the older keyword-only behavior.
 
 ## Test the Discord connection
 
@@ -156,7 +169,8 @@ python -m unittest discover -s tests -v
 python scanner.py --dry-run
 ```
 
-To test Discord locally, set `DISCORD_WEBHOOK_URL` in your environment and run:
+For a local scan, set `GEMINI_API_KEY`. To test Discord locally, also set
+`DISCORD_WEBHOOK_URL` and run:
 
 ```bash
 python scanner.py --send-test
